@@ -35,9 +35,9 @@ if [ ! -f "${WORK_DIR}/hbbs" ]; then
     echo "============================================"
     echo ""
 
-    info "安装依赖 (wget, unzip, ufw, sqlite3)..."
+    info "安装依赖 (wget, unzip, ufw)..."
     apt-get update -qq
-    apt-get install -y -qq wget unzip ufw sqlite3 > /dev/null 2>&1
+    apt-get install -y -qq wget unzip ufw > /dev/null 2>&1
 
     info "创建工作目录 ${WORK_DIR}..."
     mkdir -p ${WORK_DIR}
@@ -190,17 +190,6 @@ get_ip() {
         || echo "获取失败"
 }
 
-# 自动探测db文件
-find_db() {
-    for f in "${WORK_DIR}/db_v2.sqlite3" "${WORK_DIR}/db.sqlite3" "${WORK_DIR}/db_v2" "${WORK_DIR}/db"; do
-        if [ -f "$f" ]; then
-            echo "$f"
-            return
-        fi
-    done
-    echo ""
-}
-
 show_menu() {
     clear
     echo "==================== RustDesk 自建服务管理 ===================="
@@ -274,44 +263,38 @@ action_status() {
 
 action_devices() {
     echo ""
-    echo "==== 全部注册设备（SQLite读取，含离线） ===="
-    echo "设备ID           公网IP                状态"
+    echo "==== 注册设备列表（最近7天，从日志提取） ===="
+    echo "设备ID           公网IP                最后上报时间"
     echo "---------------------------------------------------------"
 
-    DB_FILE=$(find_db)
-    if [ -z "${DB_FILE}" ]; then
-        warn "未找到数据库文件，回退到日志模式"
-        journalctl -u rustdesk-hbbs --no-pager --since "24 hours ago" 2>/dev/null \
-            | grep 'update_pk' \
-            | awk '{id=$10; ip=$11; gsub(/\[::ffff:/,"",ip); gsub(/\]:.*/,"",ip); print id"  "ip}' \
-            | sort -u || echo "（无数据）"
-    elif ! command -v sqlite3 > /dev/null 2>&1; then
-        warn "sqlite3未安装，回退到日志模式"
-        journalctl -u rustdesk-hbbs --no-pager --since "24 hours ago" 2>/dev/null \
-            | grep 'update_pk' \
-            | awk '{id=$10; ip=$11; gsub(/\[::ffff:/,"",ip); gsub(/\]:.*/,"",ip); print id"  "ip}' \
-            | sort -u || echo "（无数据）"
-    else
-        SQL_RESULT=$(sqlite3 "${DB_FILE}" "SELECT id, info, status FROM peer ORDER BY status DESC;" 2>/dev/null || echo "")
-        if [ -z "${SQL_RESULT}" ]; then
-            SQL_TABLES=$(sqlite3 "${DB_FILE}" ".tables" 2>/dev/null)
-            warn "peer表查询失败，数据库表：${SQL_TABLES}"
-            echo "回退到日志模式："
-            journalctl -u rustdesk-hbbs --no-pager --since "24 hours ago" 2>/dev/null \
-                | grep 'update_pk' \
-                | awk '{id=$10; ip=$11; gsub(/\[::ffff:/,"",ip); gsub(/\]:.*/,"",ip); print id"  "ip}' \
-                | sort -u || echo "（无数据）"
-        else
-            echo "${SQL_RESULT}" | while IFS='|' read -r id info status; do
-                ip=$(echo "${info}" | grep -oP '"ip":"[^"]*"' | head -1 | cut -d'"' -f4)
-                ip=$(echo "${ip}" | sed 's/^::ffff://')
-                [ -z "${ip}" ] && ip="未知"
-                [ "${status}" = "1" ] && st="在线" || st="离线"
-                printf "%-15s %-20s %s\n" "${id}" "${ip}" "${st}"
-            done
-        fi
-    fi
+    # 从hbbs日志提取update_pk行，格式：update_pk <id> [<ip>]:<port> ...
+    journalctl -u rustdesk-hbbs --no-pager --since "7 days ago" 2>/dev/null \
+        | grep 'update_pk' \
+        | sed 's/::ffff://g' \
+        | awk '{
+            # 提取时间戳（前几个字段）
+            ts="";
+            for(i=1;i<=4;i++) ts=ts" "$i;
+            # 找到update_pk后面的设备ID
+            for(i=1;i<=NF;i++) {
+                if($i=="update_pk") {
+                    id=$(i+1);
+                    # 下一个字段是 [ip]:port
+                    rawip=$(i+2);
+                    gsub(/^\[/,"",rawip);
+                    gsub(/\]:.*/,"",rawip);
+                    ip=rawip;
+                    break;
+                }
+            }
+            if(id != "" && id ~ /^[0-9]+$/) {
+                printf "%-15s %-20s %s\n", id, ip, ts;
+            }
+        }' \
+        | sort -u -k1,1 || echo "（近7天无设备注册记录）"
+
     echo "---------------------------------------------------------"
+    echo "提示：开源版hbbs用sled数据库，从日志提取设备注册信息"
     pause
 }
 
