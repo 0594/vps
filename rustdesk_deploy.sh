@@ -188,20 +188,19 @@ show_menu() {
     echo "工作目录：${WORK_DIR}"
     echo "公钥路径：${WORK_DIR}/id_ed25519.pub"
     echo ""
-    echo "1.  查看服务状态（hbbs/hbbr运行情况）"
-    echo "2.  启动服务"
-    echo "3.  停止服务"
-    echo "4.  重启服务"
-    echo "5.  生成客户端一键导入串"
-    echo "6.  客户端下载地址"
-    echo "7.  查看当前活跃远程连接"
-    echo "8.  卸载RustDesk（完全清理：服务+文件+防火墙+本命令）"
-    echo "9.  查看监听端口"
-    echo "10. 获取服务器公网IP"
-    echo "11. 查询所有注册设备（含离线）"
-    echo "12. 端口连通测试"
-    echo "13. 查看实时日志"
-    echo "14. 查看公钥（单独复制Key）"
+    echo "1.  查看服务状态"
+    echo "2.  注册设备列表（含离线）"
+    echo "3.  活跃远程连接"
+    echo "4.  生成客户端一键导入串（含公钥）"
+    echo "5.  客户端下载地址"
+    echo "6.  启动服务"
+    echo "7.  停止服务"
+    echo "8.  重启服务"
+    echo "9.  端口连通测试"
+    echo "10. 查看监听端口"
+    echo "11. 获取服务器公网IP"
+    echo "12. 实时日志"
+    echo "13. 卸载RustDesk（完全清理）"
     echo "0.  退出"
     echo "==============================================================="
     read -p "请输入选项：" CHOICE
@@ -254,30 +253,62 @@ action_status() {
     pause
 }
 
-action_start() {
+action_devices() {
     echo ""
-    systemctl start rustdesk-hbbs rustdesk-hbbr
-    ok "服务启动命令已发送"
-    sleep 1
-    systemctl is-active rustdesk-hbbs > /dev/null && ok "hbbs 运行中" || err "hbbs 未运行"
-    systemctl is-active rustdesk-hbbr > /dev/null && ok "hbbr 运行中" || err "hbbr 未运行"
+    echo "==== 全部注册设备（SQLite读取，含离线） ===="
+    echo "设备ID           公网IP                状态"
+    echo "---------------------------------------------------------"
+
+    DB_FILE=$(find_db)
+    if [ -z "${DB_FILE}" ]; then
+        warn "未找到数据库文件，回退到日志模式"
+        journalctl -u rustdesk-hbbs --no-pager --since "24 hours ago" 2>/dev/null \
+            | grep 'update_pk' \
+            | awk '{id=$10; ip=$11; gsub(/\[::ffff:/,"",ip); gsub(/\]:.*/,"",ip); print id"  "ip}' \
+            | sort -u || echo "（无数据）"
+    elif ! command -v sqlite3 > /dev/null 2>&1; then
+        warn "sqlite3未安装，回退到日志模式"
+        journalctl -u rustdesk-hbbs --no-pager --since "24 hours ago" 2>/dev/null \
+            | grep 'update_pk' \
+            | awk '{id=$10; ip=$11; gsub(/\[::ffff:/,"",ip); gsub(/\]:.*/,"",ip); print id"  "ip}' \
+            | sort -u || echo "（无数据）"
+    else
+        SQL_RESULT=$(sqlite3 "${DB_FILE}" "SELECT id, info, status FROM peer ORDER BY status DESC;" 2>/dev/null || echo "")
+        if [ -z "${SQL_RESULT}" ]; then
+            SQL_TABLES=$(sqlite3 "${DB_FILE}" ".tables" 2>/dev/null)
+            warn "peer表查询失败，数据库表：${SQL_TABLES}"
+            echo "回退到日志模式："
+            journalctl -u rustdesk-hbbs --no-pager --since "24 hours ago" 2>/dev/null \
+                | grep 'update_pk' \
+                | awk '{id=$10; ip=$11; gsub(/\[::ffff:/,"",ip); gsub(/\]:.*/,"",ip); print id"  "ip}' \
+                | sort -u || echo "（无数据）"
+        else
+            echo "${SQL_RESULT}" | while IFS='|' read -r id info status; do
+                ip=$(echo "${info}" | grep -oP '"ip":"[^"]*"' | head -1 | cut -d'"' -f4)
+                ip=$(echo "${ip}" | sed 's/^::ffff://')
+                [ -z "${ip}" ] && ip="未知"
+                [ "${status}" = "1" ] && st="在线" || st="离线"
+                printf "%-15s %-20s %s\n" "${id}" "${ip}" "${st}"
+            done
+        fi
+    fi
+    echo "---------------------------------------------------------"
     pause
 }
 
-action_stop() {
+action_active() {
     echo ""
-    systemctl stop rustdesk-hbbs rustdesk-hbbr
-    ok "服务已停止"
-    pause
-}
-
-action_restart() {
+    echo "==== 当前活跃中继会话 ===="
+    echo "说明：远程窗口右上角 Direct=P2P直连(不走服务器) / Relay=中继(走服务器)"
     echo ""
-    systemctl restart rustdesk-hbbs rustdesk-hbbr
-    ok "服务重启命令已发送"
-    sleep 1
-    systemctl is-active rustdesk-hbbs > /dev/null && ok "hbbs 运行中" || err "hbbs 未运行"
-    systemctl is-active rustdesk-hbbr > /dev/null && ok "hbbr 运行中" || err "hbbr 未运行"
+    echo "提示：按回车展开最近10分钟中继连接日志"
+    read -r
+    echo ""
+    journalctl -u rustdesk-hbbr --since "10 minutes ago" --no-pager 2>/dev/null \
+        | grep -i 'relay conn' \
+        | sed 's/::ffff://g' \
+        | sed 's/^.*hbbr\[[0-9]*\]://' \
+        | tail -10 || echo "（无活跃中继会话）"
     pause
 }
 
@@ -341,19 +372,70 @@ action_download() {
     pause
 }
 
-action_active() {
+action_start() {
     echo ""
-    echo "==== 当前活跃中继会话 ===="
-    echo "说明：远程窗口右上角 Direct=P2P直连(不走服务器) / Relay=中继(走服务器)"
+    systemctl start rustdesk-hbbs rustdesk-hbbr
+    ok "服务启动命令已发送"
+    sleep 1
+    systemctl is-active rustdesk-hbbs > /dev/null && ok "hbbs 运行中" || err "hbbs 未运行"
+    systemctl is-active rustdesk-hbbr > /dev/null && ok "hbbr 运行中" || err "hbbr 未运行"
+    pause
+}
+
+action_stop() {
     echo ""
-    echo "提示：按回车展开最近10分钟中继连接日志"
-    read -r
+    systemctl stop rustdesk-hbbs rustdesk-hbbr
+    ok "服务已停止"
+    pause
+}
+
+action_restart() {
     echo ""
-    journalctl -u rustdesk-hbbr --since "10 minutes ago" --no-pager 2>/dev/null \
-        | grep -i 'relay conn' \
-        | sed 's/::ffff://g' \
-        | sed 's/^.*hbbr\[[0-9]*\]://' \
-        | tail -10 || echo "（无活跃中继会话）"
+    systemctl restart rustdesk-hbbs rustdesk-hbbr
+    ok "服务重启命令已发送"
+    sleep 1
+    systemctl is-active rustdesk-hbbs > /dev/null && ok "hbbs 运行中" || err "hbbs 未运行"
+    systemctl is-active rustdesk-hbbr > /dev/null && ok "hbbr 运行中" || err "hbbr 未运行"
+    pause
+}
+
+action_test() {
+    echo ""
+    echo "==== 本地端口连通性测试 ===="
+    ss -tln | grep -q ":21115 " && ok "21115/tcp 监听中" || err "21115/tcp 未监听"
+    ss -tln | grep -q ":21116 " && ok "21116/tcp 监听中" || err "21116/tcp 未监听"
+    ss -uln | grep -q ":21116 " && ok "21116/udp 监听中" || err "21116/udp 未监听"
+    ss -tln | grep -q ":21117 " && ok "21117/tcp 监听中" || err "21117/tcp 未监听"
+    pause
+}
+
+action_ports() {
+    echo ""
+    echo "==== 监听端口 ===="
+    ss -tulnp | grep -E "hbbs|hbbr" || warn "未找到hbbs/hbbr进程"
+    echo ""
+    echo "预期端口："
+    echo "  21115/tcp - NAT类型测试"
+    echo "  21116/tcp - ID注册/心跳"
+    echo "  21116/udp - UDP打洞"
+    echo "  21117/tcp - 中继"
+    pause
+}
+
+action_ip() {
+    echo ""
+    IP=$(get_ip)
+    echo "服务器公网IP：${IP}"
+    pause
+}
+
+action_logs() {
+    echo ""
+    echo "==== 实时日志（按 Ctrl+C 退出） ===="
+    echo "提示：IP已自动清理::ffff:前缀"
+    echo ""
+    journalctl -u rustdesk-hbbs -u rustdesk-hbbr -f 2>/dev/null | sed 's/::ffff://g'
+    echo ""
     pause
 }
 
@@ -393,119 +475,23 @@ action_uninstall() {
     pause
 }
 
-action_ports() {
-    echo ""
-    echo "==== 监听端口 ===="
-    ss -tulnp | grep -E "hbbs|hbbr" || warn "未找到hbbs/hbbr进程"
-    echo ""
-    echo "预期端口："
-    echo "  21115/tcp - NAT类型测试"
-    echo "  21116/tcp - ID注册/心跳"
-    echo "  21116/udp - UDP打洞"
-    echo "  21117/tcp - 中继"
-    pause
-}
-
-action_ip() {
-    echo ""
-    IP=$(get_ip)
-    echo "服务器公网IP：${IP}"
-    pause
-}
-
-action_devices() {
-    echo ""
-    echo "==== 全部注册设备（SQLite读取，含离线） ===="
-    echo "设备ID           公网IP                状态"
-    echo "---------------------------------------------------------"
-
-    DB_FILE=$(find_db)
-    if [ -z "${DB_FILE}" ]; then
-        warn "未找到数据库文件，回退到日志模式"
-        journalctl -u rustdesk-hbbs --no-pager --since "24 hours ago" 2>/dev/null \
-            | grep 'update_pk' \
-            | awk '{id=$10; ip=$11; gsub(/\[::ffff:/,"",ip); gsub(/\]:.*/,"",ip); print id"  "ip}' \
-            | sort -u || echo "（无数据）"
-    elif ! command -v sqlite3 > /dev/null 2>&1; then
-        warn "sqlite3未安装，回退到日志模式"
-        journalctl -u rustdesk-hbbs --no-pager --since "24 hours ago" 2>/dev/null \
-            | grep 'update_pk' \
-            | awk '{id=$10; ip=$11; gsub(/\[::ffff:/,"",ip); gsub(/\]:.*/,"",ip); print id"  "ip}' \
-            | sort -u || echo "（无数据）"
-    else
-        SQL_RESULT=$(sqlite3 "${DB_FILE}" "SELECT id, info, status FROM peer ORDER BY status DESC;" 2>/dev/null || echo "")
-        if [ -z "${SQL_RESULT}" ]; then
-            SQL_RESULT=$(sqlite3 "${DB_FILE}" ".tables" 2>/dev/null)
-            warn "peer表查询失败，数据库表：${SQL_RESULT}"
-            echo "回退到日志模式："
-            journalctl -u rustdesk-hbbs --no-pager --since "24 hours ago" 2>/dev/null \
-                | grep 'update_pk' \
-                | awk '{id=$10; ip=$11; gsub(/\[::ffff:/,"",ip); gsub(/\]:.*/,"",ip); print id"  "ip}' \
-                | sort -u || echo "（无数据）"
-        else
-            echo "${SQL_RESULT}" | while IFS='|' read -r id info status; do
-                ip=$(echo "${info}" | grep -oP '"ip":"[^"]*"' | head -1 | cut -d'"' -f4)
-                ip=$(echo "${ip}" | sed 's/^::ffff://')
-                [ -z "${ip}" ] && ip="未知"
-                [ "${status}" = "1" ] && st="在线" || st="离线"
-                printf "%-15s %-20s %s\n" "${id}" "${ip}" "${st}"
-            done
-        fi
-    fi
-    echo "---------------------------------------------------------"
-    pause
-}
-
-action_test() {
-    echo ""
-    echo "==== 本地端口连通性测试 ===="
-    ss -tln | grep -q ":21115 " && ok "21115/tcp 监听中" || err "21115/tcp 未监听"
-    ss -tln | grep -q ":21116 " && ok "21116/tcp 监听中" || err "21116/tcp 未监听"
-    ss -uln | grep -q ":21116 " && ok "21116/udp 监听中" || err "21116/udp 未监听"
-    ss -tln | grep -q ":21117 " && ok "21117/tcp 监听中" || err "21117/tcp 未监听"
-    pause
-}
-
-action_logs() {
-    echo ""
-    echo "==== 实时日志（按 Ctrl+C 退出） ===="
-    echo "提示：IP已自动清理::ffff:前缀"
-    echo ""
-    journalctl -u rustdesk-hbbs -u rustdesk-hbbr -f 2>/dev/null | sed 's/::ffff://g'
-    echo ""
-    pause
-}
-
-action_pubkey() {
-    echo ""
-    PUBKEY=$(get_pubkey)
-    echo "公钥Key（直接复制下面整行）："
-    echo ""
-    echo "${PUBKEY}"
-    echo ""
-    echo "👉 粘贴到RustDesk客户端【Key】框"
-    echo "⚠️ 不要复制多余空行/空格"
-    pause
-}
-
 # 主循环
 while true; do
     show_menu
     case ${CHOICE} in
         1) action_status ;;
-        2) action_start ;;
-        3) action_stop ;;
-        4) action_restart ;;
-        5) action_import ;;
-        6) action_download ;;
-        7) action_active ;;
-        8) action_uninstall ;;
-        9) action_ports ;;
-        10) action_ip ;;
-        11) action_devices ;;
-        12) action_test ;;
-        13) action_logs ;;
-        14) action_pubkey ;;
+        2) action_devices ;;
+        3) action_active ;;
+        4) action_import ;;
+        5) action_download ;;
+        6) action_start ;;
+        7) action_stop ;;
+        8) action_restart ;;
+        9) action_test ;;
+        10) action_ports ;;
+        11) action_ip ;;
+        12) action_logs ;;
+        13) action_uninstall ;;
         0) echo "退出"; exit 0 ;;
         *) warn "无效选项" ;;
     esac
