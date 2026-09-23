@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================ #
-#  VPS 初始化脚本（系统优化 + SSH加固 + UFW + fail2ban）
+#  VPS 初始化脚本（系统优化 + SSH加固 + UFW + fail2ban + 自动安全更新）
 #  适用：Debian Bookworm 1核1G VPS
 #  用法：bash vps_init.sh
 # ============================================================ #
@@ -45,22 +45,15 @@ echo_ok "journald 已配置内存模式（最大16M）"
 echo ""
 echo_info "配置内核网络参数（防扫描/防SYN flood）..."
 cat > /etc/sysctl.d/99-vps-hardening.conf <<'EOF'
-# 禁用ICMP重定向
 net.ipv4.conf.all.accept_redirects = 0
 net.ipv4.conf.default.accept_redirects = 0
-# 禁用源路由
 net.ipv4.conf.all.accept_source_route = 0
 net.ipv4.conf.default.accept_source_route = 0
-# 忽略ICMP广播请求
 net.ipv4.icmp_echo_ignore_broadcasts = 1
-# 忽略 bogus 错误响应
 net.ipv4.icmp_ignore_bogus_error_responses = 1
-# 开启SYN cookies防SYN flood
 net.ipv4.tcp_syncookies = 1
-# 忽略来自外部的SSM重定向
 net.ipv4.conf.all.secure_redirects = 0
 net.ipv4.conf.default.secure_redirects = 0
-# 反向路径过滤（防IP欺骗）
 net.ipv4.conf.all.rp_filter = 1
 net.ipv4.conf.default.rp_filter = 1
 EOF
@@ -169,13 +162,19 @@ chmod +x /usr/local/bin/vfw
 echo_ok "vfw 命令已安装"
 
 # ============================================================
-#  第五部分：安装 vupdate 安全补丁命令
+#  第五部分：安装 vupdate 安全补丁命令（支持 --auto 自动模式）
 # ============================================================
 echo ""
 echo_info "安装 vupdate 安全补丁命令 ..."
 cat > /usr/local/bin/vupdate <<'VUPDATE_EOF'
 #!/bin/bash
 set -u
+
+# 支持参数：vupdate --auto  全自动模式（不交互，装完自动重启）
+AUTO_MODE=0
+if [ "${1:-}" = "--auto" ]; then
+    AUTO_MODE=1
+fi
 
 echo_ok()    { echo -e "\033[32m[OK]\033[0m  $1"; }
 echo_warn()  { echo -e "\033[33m[WARN]\033[0m  $1"; }
@@ -187,8 +186,14 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
+# 自动模式写日志
+LOGFILE="/var/log/vupdate.log"
+if [ "$AUTO_MODE" = "1" ]; then
+    exec >> >(tee -a "$LOGFILE") 2>&1
+fi
+
 echo "=========================================================="
-echo "  安全补丁更新"
+echo "  安全补丁更新 $( [ "$AUTO_MODE" = "1" ] && echo "[自动模式]" )"
 echo "  时间：$(date)"
 echo "=========================================================="
 
@@ -228,7 +233,7 @@ echo_ok "Swap: ${SWAP_AFTER}MB"
 echo 'APT::Acquire::Queue-Mode "access";' > /etc/apt/apt.conf.d/99lowmem
 echo 'APT::Acquire::Retries "3";' >> /etc/apt/apt.conf.d/99lowmem
 
-# 检查dpkg锁（用文件检测，不依赖fuser）
+# 检查dpkg锁
 if [ -f /var/lib/dpkg/lock-frontend ]; then
     LOCK_PID=$(lsof -t /var/lib/dpkg/lock-frontend 2>/dev/null || echo "")
     if [ -n "$LOCK_PID" ]; then
@@ -260,10 +265,13 @@ else
     PKG_COUNT=$(echo "$SEC_PKGS" | wc -l)
     echo ""
     echo_info "共 ${PKG_COUNT} 个包"
-    read -p "⚠️  输入 y 开始安装：" CONFIRM
-    if [ "$CONFIRM" != "y" ]; then
-        echo_info "已取消"
-        exit 0
+
+    if [ "$AUTO_MODE" != "1" ]; then
+        read -p "⚠️  输入 y 开始安装：" CONFIRM
+        if [ "$CONFIRM" != "y" ]; then
+            echo_info "已取消"
+            exit 0
+        fi
     fi
 
     echo ""
@@ -285,8 +293,15 @@ fi
 echo ""
 echo_info "最终状态："
 free -h
+
 if [ -f /var/run/reboot-required ]; then
-    echo_warn "🔴 系统需要重启！低峰期执行 reboot"
+    if [ "$AUTO_MODE" = "1" ]; then
+        echo_warn "需要重启，30秒后自动重启..."
+        sleep 30
+        reboot
+    else
+        echo_warn "🔴 系统需要重启！低峰期执行 reboot"
+    fi
 else
     echo_ok "🟢 无需重启"
 fi
@@ -294,10 +309,22 @@ echo ""
 echo_ok "完成"
 VUPDATE_EOF
 chmod +x /usr/local/bin/vupdate
-echo_ok "vupdate 命令已安装"
+echo_ok "vupdate 命令已安装（支持 vupdate --auto 全自动模式）"
 
 # ============================================================
-#  第六部分：安装 fail2ban（自动封SSH爆破IP）
+#  第六部分：配置每月自动安全更新（cron）
+# ============================================================
+echo ""
+echo_info "配置每月自动安全更新（每月1号凌晨3点）..."
+cat > /etc/cron.d/vps-auto-update <<'EOF'
+# 每月1号凌晨3点自动安全补丁更新，需要重启则自动重启
+0 3 1 * * root /usr/local/bin/vupdate --auto
+EOF
+chmod 644 /etc/cron.d/vps-auto-update
+echo_ok "自动更新已配置（日志: /var/log/vupdate.log）"
+
+# ============================================================
+#  第七部分：安装 fail2ban（自动封SSH爆破IP）
 # ============================================================
 echo ""
 echo "============ 【fail2ban 防爆破】 ============"
@@ -318,7 +345,7 @@ systemctl restart fail2ban
 echo_ok "fail2ban 已启用（SSH失败3次封IP 1小时）"
 
 # ============================================================
-#  第七部分：备份 sshd 配置
+#  第八部分：备份 sshd 配置
 # ============================================================
 echo ""
 echo_info "备份 sshd_config ..."
@@ -326,7 +353,7 @@ cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak.$(date +%Y%m%d%H%M%S)
 echo_ok "已备份"
 
 # ============================================================
-#  第八部分：SSH安全加固
+#  第九部分：SSH安全加固
 # ============================================================
 echo ""
 echo_info "开始SSH安全加固..."
@@ -336,7 +363,6 @@ sed -i 's/^MaxAuthTries 6/MaxAuthTries 3/' /etc/ssh/sshd_config
 sed -i 's/^#PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config
 sed -i 's/^PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config
 
-# SSH空闲超时：5分钟无操作断开
 sed -i 's/^#ClientAliveInterval.*/ClientAliveInterval 300/' /etc/ssh/sshd_config
 sed -i 's/^ClientAliveInterval.*/ClientAliveInterval 300/' /etc/ssh/sshd_config
 sed -i 's/^#ClientAliveCountMax.*/ClientAliveCountMax 2/' /etc/ssh/sshd_config
@@ -355,7 +381,7 @@ systemctl restart sshd
 echo_ok "sshd 已重启"
 
 # ============================================================
-#  第九部分：状态检测
+#  第十部分：状态检测
 # ============================================================
 echo ""
 echo "=========================================================="
@@ -384,10 +410,14 @@ echo ""
 echo_info "--- fail2ban 状态 ---"
 if systemctl is-active --quiet fail2ban; then
     echo_ok "fail2ban 运行中"
-    fail2ban-client status sshd 2>/dev/null | head -5
 else
     echo_warn "fail2ban 未运行"
 fi
+
+echo ""
+echo_info "--- 自动更新 ---"
+echo_info "每月1号凌晨3点自动执行 vupdate --auto"
+echo_info "日志文件: /var/log/vupdate.log"
 
 echo ""
 echo_info "--- SSH安全状态 ---"
@@ -405,13 +435,11 @@ else
 fi
 MAX_TRIES=$(grep -E '^MaxAuthTries' /etc/ssh/sshd_config | awk '{print $2}')
 echo_info "最大认证次数：${MAX_TRIES:-6}"
-ALIVE_INT=$(grep -E '^ClientAliveInterval' /etc/ssh/sshd_config | awk '{print $2}')
-echo_info "空闲超时：${ALIVE_INT:-300}秒"
 
 echo ""
 echo_info "--- 已安装命令 ---"
 echo_info "  vfw      防火墙端口管理菜单"
-echo_info "  vupdate  安全补丁更新"
+echo_info "  vupdate  安全补丁更新（vupdate --auto 全自动）"
 
 echo ""
 echo_info "--- 内存状态 ---"
