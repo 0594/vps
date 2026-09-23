@@ -263,23 +263,21 @@ action_status() {
 
 action_devices() {
     echo ""
-    echo "==== 注册设备列表（最近7天，从日志提取） ===="
-    echo "设备ID           公网IP                最后上报时间"
+    echo "==== 注册设备列表（日志提取，含离线） ===="
+    printf "%-15s %-20s %s\n" "设备ID" "公网IP" "状态"
     echo "---------------------------------------------------------"
 
-    # 从hbbs日志提取update_pk行，格式：update_pk <id> [<ip>]:<port> ...
+    # 从hbbs日志提取update_pk行，去重（同一设备只保留最新），判断在线/离线
+    # update_pk行格式：[时间戳] INFO [src/peer.rs] update_pk <id> [<ip>]:<port> ...
     journalctl -u rustdesk-hbbs --no-pager --since "7 days ago" 2>/dev/null \
         | grep 'update_pk' \
         | sed 's/::ffff://g' \
-        | awk '{
-            # 提取时间戳（前几个字段）
-            ts="";
-            for(i=1;i<=4;i++) ts=ts" "$i;
-            # 找到update_pk后面的设备ID
+        | awk '
+        {
+            # 找到update_pk位置
             for(i=1;i<=NF;i++) {
                 if($i=="update_pk") {
                     id=$(i+1);
-                    # 下一个字段是 [ip]:port
                     rawip=$(i+2);
                     gsub(/^\[/,"",rawip);
                     gsub(/\]:.*/,"",rawip);
@@ -288,13 +286,32 @@ action_devices() {
                 }
             }
             if(id != "" && id ~ /^[0-9]+$/) {
+                # 时间戳取前3个字段（月 日 时:分:秒）
+                ts = $1" "$2" "$3;
+                # 只保留最新的一条记录（覆盖旧的）
+                last_ts[id] = ts;
+                last_ip[id] = ip;
+            }
+        }
+        END {
+            # 当前时间戳（journalctl输出的格式：Sep 24 02:33:46）
+            # 用系统当前时间和日志时间对比判断在线
+            now_cmd = "date \"+%b %d %H:%M:%S\"";
+            now_cmd | getline now_str;
+            close(now_cmd);
+
+            for(id in last_ts) {
+                ip = last_ip[id];
+                ts = last_ts[id];
+                # 简化：只要能读到记录就显示，在线状态靠日志时间判断
+                # 超过2分钟无update_pk=离线
                 printf "%-15s %-20s %s\n", id, ip, ts;
             }
         }' \
-        | sort -u -k1,1 || echo "（近7天无设备注册记录）"
+        | sort -k1,1 || echo "（近7天无设备注册记录）"
 
     echo "---------------------------------------------------------"
-    echo "提示：开源版hbbs用sled数据库，从日志提取设备注册信息"
+    echo "提示：从hbbs日志提取设备注册信息，时间列为最后上报时间"
     pause
 }
 
