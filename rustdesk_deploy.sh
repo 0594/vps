@@ -175,7 +175,6 @@ cat > ${RD_CMD} << 'MENUEOF'
 WORK_DIR="/opt/rustdesk"
 IP_API="icanhazip.com"
 DB_FILE="${WORK_DIR}/db_v2.sqlite3"
-TMP_DB="/tmp/rustdesk_online.db"
 
 info()  { echo -e "\033[1;34m[INFO]\033[0m $*"; }
 ok()    { echo -e "\033[1;32m[OK]\033[0m $*"; }
@@ -192,6 +191,25 @@ get_ip() {
         || echo "获取失败"
 }
 
+# 从hbbs日志提取最近N分钟内有心跳的设备ID集合
+# 返回：空格分隔的设备ID列表
+get_online_ids() {
+    local minutes=${1:-2}
+    journalctl -u rustdesk-hbbs --since "${minutes} minutes ago" --no-pager 2>/dev/null \
+        | grep 'update_pk' \
+        | awk '{
+            for(i=1;i<=NF;i++) {
+                if($i=="update_pk") {
+                    print $(i+1);
+                    break;
+                }
+            }
+        }' \
+        | grep -E '^[0-9]+$' \
+        | sort -u \
+        | tr '\n' ' '
+}
+
 show_menu() {
     clear
     echo "==================== RustDesk 自建服务管理 ===================="
@@ -199,9 +217,9 @@ show_menu() {
     echo "公钥路径：${WORK_DIR}/id_ed25519.pub"
     echo ""
     echo "1.  查看服务状态"
-    echo "2.  注册设备列表（含备注）"
+    echo "2.  注册设备列表（含在线状态）"
     echo "3.  修改设备备注"
-    echo "4.  探测在线设备（约45秒）"
+    echo "4.  探测在线设备"
     echo "5.  活跃远程连接"
     echo "6.  生成客户端一键导入串（含公钥）"
     echo "7.  客户端下载地址"
@@ -268,8 +286,8 @@ action_status() {
 action_devices() {
     echo ""
     echo "==== 注册设备列表（读取SQLite数据库） ===="
-    printf "%-15s %-20s %-15s %s\n" "设备ID" "注册时间(CST)" "备注" "公网IP"
-    echo "-------------------------------------------------------------------------"
+    printf "%-15s %-8s %-20s %-15s %s\n" "设备ID" "状态" "注册时间(CST)" "备注" "公网IP"
+    echo "------------------------------------------------------------------------------------"
 
     if [ ! -f "${DB_FILE}" ]; then
         echo "（数据库文件不存在，hbbs尚未创建数据库）"
@@ -281,6 +299,9 @@ action_devices() {
     if [ "${count}" = "0" ]; then
         echo "（暂无注册设备）"
     else
+        # 获取最近2分钟有心跳的设备ID集合
+        local online_ids=$(get_online_ids 2)
+
         sqlite3 -json "${DB_FILE}" "SELECT id, created_at, note, info FROM peer;" 2>/dev/null \
         | jq -r '.[] | [
             .id,
@@ -290,12 +311,17 @@ action_devices() {
         ] | @tsv' \
         | sed 's/::ffff://' \
         | while IFS=$'\t' read -r devid cst_time note ip; do
-            printf "%-15s %-20s %-15s %s\n" "$devid" "$cst_time" "$note" "$ip"
+            # 判断在线状态
+            local status="离线"
+            if echo "${online_ids}" | grep -qw "${devid}"; then
+                status="在线"
+            fi
+            printf "%-15s %-8s %-20s %-15s %s\n" "$devid" "$status" "$cst_time" "$note" "$ip"
         done
     fi
 
-    echo "-------------------------------------------------------------------------"
-    echo "提示：注册时间为北京时间(CST)，备注可在选项3修改"
+    echo "------------------------------------------------------------------------------------"
+    echo "提示：在线=最近2分钟内有update_pk心跳；备注可在选项3修改"
     pause
 }
 
@@ -355,9 +381,8 @@ action_note() {
 
 action_online_probe() {
     echo ""
-    echo "==== 探测在线设备 ===="
+    echo "==== 探测在线设备（日志update_pk方案） ===="
 
-    # 检查hbbs运行中
     if ! systemctl is-active rustdesk-hbbs > /dev/null 2>&1; then
         err "hbbs服务未运行，无法探测"
         pause
@@ -370,66 +395,43 @@ action_online_probe() {
         return
     fi
 
-    echo "原理：复制数据库到临时文件 → 清空临时库peer表 → 等待45秒"
-    echo "      在线客户端会在心跳时自动重新注册到临时库"
-    echo "      正式数据库完全不受影响"
+    echo "原理：读取hbbs最近2分钟日志，提取update_pk心跳设备ID"
+    echo "      关联sqlite数据库显示设备备注和IP"
     echo ""
-    read -p "确认开始探测？输入 y 继续：" CONFIRM
-    if [ "${CONFIRM}" != "y" ] && [ "${CONFIRM}" != "Y" ]; then
-        info "已取消"
-        pause
-        return
-    fi
 
-    # 1. 复制数据库到临时文件
-    info "复制数据库到临时文件..."
-    cp "${DB_FILE}" "${TMP_DB}"
-    # 同时复制wal/shm（如果存在）
-    [ -f "${DB_FILE}-wal" ] && cp "${DB_FILE}-wal" "${TMP_DB}-wal"
-    [ -f "${DB_FILE}-shm" ] && cp "${DB_FILE}-shm" "${TMP_DB}-shm"
+    # 获取在线设备ID
+    local online_ids=$(get_online_ids 2)
+    local online_count=$(echo "${online_ids}" | wc -w)
 
-    # 2. 清空临时库peer表
-    info "清空临时库peer表..."
-    sqlite3 "${TMP_DB}" "DELETE FROM peer;"
-
-    # 3. 倒计时等待45秒
-    echo ""
-    info "等待在线客户端上报心跳（45秒）..."
-    for i in $(seq 45 -1 1); do
-        printf "\r剩余等待：%02d 秒" "${i}"
-        sleep 1
-    done
-    printf "\r等待完成！           \n"
-
-    # 4. 查询临时库
-    echo ""
-    echo "==== 当前在线设备列表 ===="
-    printf "%-15s %-20s %-15s %s\n" "设备ID" "上报时间(CST)" "备注" "公网IP"
-    echo "-------------------------------------------------------------------------"
-
-    local online_count=$(sqlite3 "${TMP_DB}" "SELECT count(*) FROM peer;" 2>/dev/null)
     if [ "${online_count}" = "0" ]; then
-        echo "（45秒内无设备上报，可能全部离线）"
+        echo "（最近2分钟无update_pk心跳记录）"
+        echo ""
+        echo "可能原因："
+        echo "1. 所有设备离线"
+        echo "2. hbbs未输出update_pk日志（版本差异）"
+        echo "3. 客户端心跳间隔较长，可等待后重试"
+        echo ""
+        echo "手动验证命令："
+        echo "  journalctl -u rustdesk-hbbs --since '2 minutes ago' | grep update_pk"
     else
-        sqlite3 -json "${TMP_DB}" "SELECT id, created_at, note, info FROM peer;" 2>/dev/null \
-        | jq -r '.[] | [
-            .id,
-            (.created_at | strptime("%Y-%m-%d %H:%M:%S") | mktime | . + (8*3600) | strftime("%Y-%m-%d %H:%M:%S")),
-            (.note // "-"),
-            (.info | fromjson).ip // "-"
-        ] | @tsv' \
-        | sed 's/::ffff://' \
-        | while IFS=$'\t' read -r devid cst_time note ip; do
-            printf "%-15s %-20s %-15s %s\n" "$devid" "$cst_time" "$note" "$ip"
+        echo "==== 在线设备列表（最近2分钟心跳） ===="
+        printf "%-15s %-15s %s\n" "设备ID" "备注" "公网IP"
+        echo "-------------------------------------------------------------------------"
+
+        # 遍历在线设备ID，关联sqlite获取备注和IP
+        for devid in ${online_ids}; do
+            local note=$(sqlite3 "${DB_FILE}" "SELECT note FROM peer WHERE id='${devid}';" 2>/dev/null)
+            local info=$(sqlite3 "${DB_FILE}" "SELECT info FROM peer WHERE id='${devid}';" 2>/dev/null)
+            local ip=$(echo "${info}" | jq -r '.ip // "-"' 2>/dev/null | sed 's/::ffff://')
+            [ -z "${note}" ] && note="-"
+            [ -z "${ip}" ] && ip="-"
+            printf "%-15s %-15s %s\n" "$devid" "$note" "$ip"
         done
+
+        echo "-------------------------------------------------------------------------"
+        echo "在线设备数：${online_count}"
     fi
 
-    echo "-------------------------------------------------------------------------"
-    echo "在线设备数：${online_count}"
-
-    # 5. 清理临时文件
-    rm -f "${TMP_DB}" "${TMP_DB}-wal" "${TMP_DB}-shm"
-    ok "临时文件已清理，正式数据库未受影响"
     pause
 }
 
