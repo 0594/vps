@@ -247,10 +247,11 @@ action_import() {
         pause
         return
     fi
-    # 正确格式：relay留空，客户端自动从hbbs获取中继地址
+    # JSON格式：relay留空，客户端自动从hbbs获取中继地址
     JSON="{\"host\":\"${IP}\",\"relay\":\"\",\"api\":\"\",\"key\":\"${PUBKEY}\"}"
-    REVERSED=$(echo -n "${JSON}" | rev)
-    IMPORT_STR=$(echo -n "${REVERSED}" | base64 -w0 | tr '+/' '-_' | tr -d '=')
+    # 正确编码顺序：JSON -> base64url编码 -> 反转base64字符串
+    B64=$(echo -n "${JSON}" | base64 -w0 | tr '+/' '-_' | tr -d '=')
+    IMPORT_STR=$(echo -n "${B64}" | rev)
     echo "--------------------------"
     echo "服务器IP: ${IP}"
     echo "公钥Key:  ${PUBKEY}"
