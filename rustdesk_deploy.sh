@@ -300,12 +300,19 @@ action_download() {
 
 action_active() {
     echo ""
-    echo "当前活跃中继会话（hbbr最近活动）："
-    echo "--------------------------"
-    journalctl -u rustdesk-hbbr --no-pager -n 20 2>/dev/null | grep -v "^--" | tail -10 || warn "无中继会话"
-    echo "--------------------------"
-    echo ""
-    echo "提示：远程窗口右上角显示 Direct=P2P直连(不占服务器) / Relay=中继(走服务器)"
+    echo "--- 当前活跃中继会话 ---"
+    echo "主控端ID           被控端ID           客户端IP"
+    echo "---------------------------------------------------------"
+    # 优先用hbbs数据库查询活跃连接
+    CONN_OUTPUT=$(${WORK_DIR}/hbbs -p ${WORK_DIR}/db list-conn 2>/dev/null || echo "")
+    if [ -n "${CONN_OUTPUT}" ]; then
+        echo "${CONN_OUTPUT}" | awk '/^[0-9]+/ {printf "%-18s %-18s %s\n", $1, $2, $3}'
+    else
+        # 回退：从hbbr日志提取最近中继活动
+        journalctl -u rustdesk-hbbr --no-pager -n 15 2>/dev/null | grep -v "^--" | tail -8 || echo "（无活跃中继会话）"
+    fi
+    echo "---------------------------------------------------------"
+    echo "提示：远程窗口右上角 Direct=P2P直连(不占服务器) / Relay=中继(走服务器)"
     pause
 }
 
@@ -371,15 +378,26 @@ action_ip() {
 
 action_devices() {
     echo ""
-    echo "最近24小时注册/连接的设备（从hbbs日志提取）："
-    echo "--------------------------"
-    journalctl -u rustdesk-hbbs --no-pager --since "24 hours ago" 2>/dev/null \
-        | grep -iE "register|peer|login|id.*[0-9]+" \
-        | sed 's/^.*hbbs\[[0-9]*\]://' \
-        | tail -15 || echo "（无设备注册记录）"
-    echo "--------------------------"
-    echo ""
-    echo "提示：开源版hbbs从日志提取设备活动，包含设备ID和客户端公网IP"
+    echo "--- 全部注册设备（含离线） ---"
+    echo "设备ID           公网IP                在线状态"
+    echo "---------------------------------------------------------"
+    # 优先用hbbs数据库查询设备列表
+    DEV_OUTPUT=$(${WORK_DIR}/hbbs -p ${WORK_DIR}/db list-dev 2>/dev/null || echo "")
+    if [ -n "${DEV_OUTPUT}" ]; then
+        echo "${DEV_OUTPUT}" | awk '/^[0-9]+/ {
+            id=$1; ip=$2;
+            status=($3=="true")?"在线":"离线";
+            printf "%-15s %-20s %s\n", id, ip, status
+        }'
+    else
+        # 回退：从hbbs日志提取最近24小时设备注册
+        journalctl -u rustdesk-hbbs --no-pager --since "24 hours ago" 2>/dev/null \
+            | grep -iE "register|peer|login" \
+            | sed 's/^.*hbbs\[[0-9]*\]://' \
+            | tail -12 || echo "（无设备注册记录）"
+    fi
+    echo "---------------------------------------------------------"
+    echo "提示：从hbbs数据库读取，包含设备ID、客户端公网IP和在线状态"
     pause
 }
 
