@@ -193,34 +193,37 @@ get_ip() {
 
 # 从hbbs日志提取设备心跳信息
 # 日志格式: [2026-09-24 04:50:15.570408 +08:00] INFO [src/peer.rs:102] update_pk 1679009027 [::ffff:183.171.249.88]:61622
+# 注意: Debian默认awk是mawk,不支持{2}量词,用[0-9][0-9]代替
 # 输出格式: 设备ID TAB 最后心跳时间(CST) TAB 实时IP
 get_heartbeat_info() {
     journalctl -u rustdesk-hbbs --since "10 minutes ago" --no-pager 2>/dev/null \
         | grep 'update_pk' \
         | awk '
         {
-            # 用match直接在整行上匹配，不受空格分割影响
-
-            # 1. 提取ISO时间 [2026-09-24 04:50:15.570408 +08:00]
             ts_str = "";
-            if (match($0, /\[20[0-9]{2}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}/)) {
+            devid = "";
+            ip = "";
+
+            # 1. 提取ISO时间 [2026-09-24 04:50:15
+            #    [::ffff: 是8个字符, [20 也是开头
+            if (match($0, /\[20[0-9][0-9]-[0-9][0-9]-[0-9][0-9] [0-9][0-9]:[0-9][0-9]:[0-9][0-9]/)) {
                 ts_str = substr($0, RSTART+1, RLENGTH-1);
             }
 
             # 2. 提取设备ID: update_pk后面紧跟的数字
-            devid = "";
+            #    "update_pk " 是9个字符
             if (match($0, /update_pk [0-9]+/)) {
                 devid = substr($0, RSTART+9, RLENGTH-9);
             }
 
-            # 3. 提取IP: [::ffff:IP]
-            ip = "";
+            # 3. 提取IP: [::ffff:IP
+            #    "[::ffff:" 是8个字符
             if (match($0, /\[::ffff:[0-9.]+/)) {
-                ip = substr($0, RSTART+9, RLENGTH-9);
+                ip = substr($0, RSTART+8, RLENGTH-8);
             }
 
             if(devid != "" && devid ~ /^[0-9]+$/) {
-                # 只保留每个设备最新的心跳
+                # 只保留每个设备最新的心跳(字符串比较即可,ISO格式可字典序排序)
                 if(!(devid in last_ts_str) || ts_str > last_ts_str[devid]) {
                     last_ts_str[devid] = ts_str;
                     last_ip[devid] = ip;
@@ -347,7 +350,7 @@ action_devices() {
 
             if [ -n "${hb_time}" ]; then
                 hb_display="${hb_time}"
-                # ISO时间已经是+08:00，直接转时间戳
+                # ISO时间已经是+08:00时区,直接转时间戳
                 local hb_epoch=$(date -d "${hb_time}" +%s 2>/dev/null || echo 0)
                 local diff=$((now_epoch - hb_epoch))
                 if [ ${diff} -le ${threshold} ]; then
