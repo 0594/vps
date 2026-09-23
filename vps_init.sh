@@ -66,7 +66,10 @@ else
     echo_warn "跳过启用，手动执行 ufw enable"
 fi
 
-# 安装 vfw 端口管理命令（交互式菜单版）
+# ============================================================
+#  第三部分：安装 vfw 端口管理命令
+# ============================================================
+echo ""
 echo_info "安装 vfw 端口管理命令 ..."
 cat > /usr/local/bin/vfw <<'VFW_EOF'
 #!/bin/bash
@@ -136,11 +139,135 @@ while true; do
 done
 VFW_EOF
 chmod +x /usr/local/bin/vfw
-echo_ok "vfw 命令已安装到 /usr/local/bin/vfw"
-echo_info "使用方法: 直接输入 vfw 即可进入菜单"
+echo_ok "vfw 命令已安装"
 
 # ============================================================
-#  第三部分：备份 sshd 配置
+#  第四部分：安装 vupdate 安全补丁命令
+# ============================================================
+echo ""
+echo_info "安装 vupdate 安全补丁命令 ..."
+cat > /usr/local/bin/vupdate <<'VUPDATE_EOF'
+#!/bin/bash
+# vupdate - VPS 安全补丁更新（1核1G优化版）
+set -u
+
+echo_ok()    { echo -e "\033[32m[OK]\033[0m  $1"; }
+echo_warn()  { echo -e "\033[33m[WARN]\033[0m  $1"; }
+echo_error() { echo -e "\033[31m[ERROR]\033[0m $1"; }
+echo_info()  { echo -e "\033[36m[INFO]\033[0m  $1"; }
+
+if [ "$(id -u)" -ne 0 ]; then
+    echo_error "必须root运行"
+    exit 1
+fi
+
+echo "=========================================================="
+echo "  安全补丁更新"
+echo "  时间：$(date)"
+echo "=========================================================="
+
+# --- 检查并配置swap ---
+echo ""
+echo_info "检查Swap状态..."
+SWAP_NOW=$(free -m | awk '/Swap:/{print $2}')
+if [ "$SWAP_NOW" -lt 1000 ]; then
+    echo_warn "Swap不足，自动创建1G swapfile..."
+    if [ ! -f /swapfile ]; then
+        if command -v fallocate &>/dev/null; then
+            fallocate -l 1G /swapfile
+        else
+            dd if=/dev/zero of=/swapfile bs=1M count=1024 status=progress
+        fi
+        chmod 600 /swapfile
+        mkswap /swapfile
+    fi
+    swapon /swapfile 2>/dev/null
+    grep -q "/swapfile" /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+    sed -i '/^vm.swappiness=/c\vm.swappiness=10' /etc/sysctl.conf
+    grep -q "^vm.swappiness=" /etc/sysctl.conf || echo 'vm.swappiness=10' >> /etc/sysctl.conf
+    sysctl vm.swappiness=10 &>/dev/null
+    sleep 2
+else
+    echo_ok "Swap已就绪 (${SWAP_NOW}MB)"
+fi
+
+SWAP_AFTER=$(free -m | awk '/Swap:/{print $2}')
+if [ "$SWAP_AFTER" -lt 1000 ]; then
+    echo_error "Swap创建失败，中止更新"
+    exit 5
+fi
+echo_ok "Swap: ${SWAP_AFTER}MB"
+
+# --- apt低优先级配置 ---
+echo 'APT::Acquire::Queue-Mode "access";' > /etc/apt/apt.conf.d/99lowmem
+echo 'APT::Acquire::Retries "3";' >> /etc/apt/apt.conf.d/99lowmem
+
+if fuser /var/lib/dpkg/lock-frontend &>/dev/null; then
+    echo_error "apt进程正在运行，请稍后再试"
+    exit 2
+fi
+
+# --- 刷新软件源 ---
+echo ""
+echo_info "刷新软件源（低优先级运行）..."
+nice -n 10 ionice -c 3 apt update -o Acquire::Languages=none -o Acquire::Translation=none
+if [ $? -ne 0 ]; then
+    echo_error "apt update失败，自动修复dpkg..."
+    dpkg --configure -a
+    exit 3
+fi
+
+# --- 列出安全补丁 ---
+echo ""
+echo_info "检查安全补丁..."
+SEC_PKGS=$(apt list --upgradable 2>/dev/null | grep "bookworm-security" | cut -d/ -f1 | sort -u)
+
+if [ -z "$SEC_PKGS" ]; then
+    echo_ok "✅ 没有安全补丁需要安装"
+else
+    echo_info "待更新安全包："
+    echo "$SEC_PKGS"
+    PKG_COUNT=$(echo "$SEC_PKGS" | wc -l)
+    echo ""
+    echo_info "共 ${PKG_COUNT} 个包"
+    read -p "⚠️  输入 y 开始安装：" CONFIRM
+    if [ "$CONFIRM" != "y" ]; then
+        echo_info "已取消"
+        exit 0
+    fi
+
+    echo ""
+    echo_info "安装安全补丁（低优先级运行）..."
+    DEBIAN_FRONTEND=noninteractive nice -n 10 ionice -c 3 \
+        apt install -y --only-upgrade $SEC_PKGS \
+        -o Dpkg::Options::="--force-confold"
+    if [ $? -ne 0 ]; then
+        echo_error "安装出错，自动修复dpkg..."
+        dpkg --configure -a
+        exit 4
+    fi
+    echo_info "清理apt缓存..."
+    apt clean
+    apt autoremove -y
+fi
+
+# --- 结果 ---
+echo ""
+echo_info "最终状态："
+free -h
+if [ -f /var/run/reboot-required ]; then
+    echo_warn "🔴 系统需要重启！低峰期执行 reboot"
+else
+    echo_ok "🟢 无需重启"
+fi
+echo ""
+echo_ok "完成"
+VUPDATE_EOF
+chmod +x /usr/local/bin/vupdate
+echo_ok "vupdate 命令已安装"
+
+# ============================================================
+#  第五部分：备份 sshd 配置
 # ============================================================
 echo ""
 echo_info "备份 sshd_config ..."
@@ -148,7 +275,7 @@ cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak.$(date +%Y%m%d%H%M%S)
 echo_ok "已备份"
 
 # ============================================================
-#  第四部分：SSH安全加固
+#  第六部分：SSH安全加固
 # ============================================================
 echo ""
 echo_info "开始SSH安全加固..."
@@ -170,7 +297,7 @@ systemctl restart sshd
 echo_ok "sshd 已重启"
 
 # ============================================================
-#  第五部分：状态检测
+#  第七部分：状态检测
 # ============================================================
 echo ""
 echo "=========================================================="
@@ -213,6 +340,11 @@ MAX_TRIES=$(grep -E '^MaxAuthTries' /etc/ssh/sshd_config | awk '{print $2}')
 echo_info "最大认证次数：${MAX_TRIES:-6}"
 
 echo ""
+echo_info "--- 已安装命令 ---"
+echo_info "  vfw      防火墙端口管理菜单"
+echo_info "  vupdate  安全补丁更新"
+
+echo ""
 echo_info "--- 内存状态 ---"
 free -h
 
@@ -220,7 +352,3 @@ echo ""
 echo "=========================================================="
 echo "  ✅ 初始化完成"
 echo "=========================================================="
-echo_info ""
-echo_info "常用命令："
-echo_info "  vfw               端口管理菜单（开放/删除/查看）"
-echo_info "  vps_safe_update.sh 安全补丁更新"
