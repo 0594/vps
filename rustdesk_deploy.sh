@@ -314,7 +314,7 @@ action_active() {
     echo "--- 当前活跃中继会话（最近10分钟） ---"
     echo "---------------------------------------------------------"
     journalctl -u rustdesk-hbbr --no-pager --since "10 minutes ago" 2>/dev/null \
-        | grep -iE "relay|session|connect|close" \
+        | grep -i 'relay conn' \
         | sed 's/^.*hbbr\[[0-9]*\]://' \
         | tail -10 || echo "（无活跃中继会话）"
     echo "---------------------------------------------------------"
@@ -402,10 +402,8 @@ action_devices() {
             | awk '{id=$10; ip=$11; gsub(/\[::ffff:/,"",ip); gsub(/\]:.*/,"",ip); print id"  "ip}' \
             | sort -u || echo "（无数据）"
     else
-        # 尝试查询peer表
         SQL_RESULT=$(sqlite3 "${DB_FILE}" "SELECT id, info, status FROM peer ORDER BY status DESC;" 2>/dev/null || echo "")
         if [ -z "${SQL_RESULT}" ]; then
-            # 尝试其他表名
             SQL_RESULT=$(sqlite3 "${DB_FILE}" ".tables" 2>/dev/null)
             warn "peer表查询失败，数据库表：${SQL_RESULT}"
             echo "回退到日志模式："
@@ -415,8 +413,9 @@ action_devices() {
                 | sort -u || echo "（无数据）"
         else
             echo "${SQL_RESULT}" | while IFS='|' read -r id info status; do
-                # 从info JSON中提取IP
                 ip=$(echo "${info}" | grep -oP '"ip":"[^"]*"' | head -1 | cut -d'"' -f4)
+                # 清除::ffff:IPv6映射前缀
+                ip=$(echo "${ip}" | sed 's/^::ffff://')
                 [ -z "${ip}" ] && ip="未知"
                 [ "${status}" = "1" ] && st="在线" || st="离线"
                 printf "%-15s %-20s %s\n" "${id}" "${ip}" "${st}"
