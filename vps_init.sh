@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================ #
-#  VPS 初始化脚本（系统优化 + SSH加固 + UFW + fail2ban + 自动安全更新）
+#  VPS 初始化脚本（全自动，无交互）
 #  适用：Debian Bookworm 1核1G VPS
 #  用法：bash vps_init.sh
 # ============================================================ #
@@ -17,7 +17,7 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 
 echo "=========================================================="
-echo "  VPS 初始化脚本"
+echo "  VPS 初始化脚本（全自动模式）"
 echo "  时间：$(date)"
 echo "=========================================================="
 
@@ -61,7 +61,7 @@ sysctl -p /etc/sysctl.d/99-vps-hardening.conf >/dev/null 2>&1
 echo_ok "内核参数已加固"
 
 # ============================================================
-#  第三部分：UFW 防火墙
+#  第三部分：UFW 防火墙（全自动启用）
 # ============================================================
 echo ""
 echo "============ 【UFW防火墙】 ============"
@@ -73,19 +73,14 @@ echo_info "设置默认策略：拒绝入站，允许出站 ..."
 ufw default deny incoming
 ufw default allow outgoing
 
-echo_info "放行基础端口：SSH / HTTP / HTTPS ..."
+echo_info "放行基础端口：SSH(22) / HTTP(80) / HTTPS(443) ..."
 ufw allow ssh
 ufw allow 80/tcp
 ufw allow 443/tcp
 
-echo_warn "即将启用防火墙，SSH(22)已放行，不会断开连接"
-read -p "⚠️  输入 y 启用防火墙：" CONFIRM
-if [ "$CONFIRM" = "y" ]; then
-    ufw --force enable
-    echo_ok "UFW 已启用"
-else
-    echo_warn "跳过启用，手动执行 ufw enable"
-fi
+echo_info "启用防火墙（SSH已放行，不会断开）..."
+ufw --force enable
+echo_ok "UFW 已启用"
 
 # ============================================================
 #  第四部分：安装 vfw 端口管理命令
@@ -162,7 +157,7 @@ chmod +x /usr/local/bin/vfw
 echo_ok "vfw 命令已安装"
 
 # ============================================================
-#  第五部分：安装 vupdate 安全补丁命令（支持 --auto 自动模式）
+#  第五部分：安装 vupdate 安全补丁命令
 # ============================================================
 echo ""
 echo_info "安装 vupdate 安全补丁命令 ..."
@@ -301,7 +296,7 @@ echo ""
 echo_ok "完成"
 VUPDATE_EOF
 chmod +x /usr/local/bin/vupdate
-echo_ok "vupdate 命令已安装（支持 vupdate --auto 全自动模式）"
+echo_ok "vupdate 命令已安装（vupdate 手动 / vupdate --auto 全自动）"
 
 # ============================================================
 #  第六部分：配置每月自动安全更新（cron）
@@ -344,7 +339,7 @@ cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak.$(date +%Y%m%d%H%M%S)
 echo_ok "已备份"
 
 # ============================================================
-#  第九部分：SSH安全加固
+#  第九部分：SSH安全加固（改完先校验配置，通过才重启）
 # ============================================================
 echo ""
 echo_info "开始SSH安全加固..."
@@ -359,17 +354,15 @@ sed -i 's/^ClientAliveInterval.*/ClientAliveInterval 300/' /etc/ssh/sshd_config
 sed -i 's/^#ClientAliveCountMax.*/ClientAliveCountMax 2/' /etc/ssh/sshd_config
 sed -i 's/^ClientAliveCountMax.*/ClientAliveCountMax 2/' /etc/ssh/sshd_config
 
-echo_ok "SSH配置已修改（密钥登录+密码关闭+超时断开）"
-
-echo ""
-echo_warn "即将重启 sshd"
-read -p "⚠️  已新开SSH窗口确认密钥可登录？输入 y 继续：" CONFIRM
-if [ "$CONFIRM" != "y" ]; then
-    echo_warn "已取消重启"
-    exit 0
+# 校验sshd配置语法，不通过就不重启（防止锁死）
+if sshd -t 2>/dev/null; then
+    echo_ok "sshd配置校验通过，重启sshd..."
+    systemctl restart sshd
+    echo_ok "sshd 已重启"
+else
+    echo_error "sshd配置校验失败！未重启sshd，保持当前连接"
+    echo_error "请手动检查 /etc/ssh/sshd_config"
 fi
-systemctl restart sshd
-echo_ok "sshd 已重启"
 
 # ============================================================
 #  第十部分：状态检测
