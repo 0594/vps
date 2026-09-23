@@ -247,14 +247,14 @@ action_import() {
         pause
         return
     fi
-    # host=ID服务器, relay=中继服务器(同一台), api=空(开源版无API)
-    JSON="{\"host\":\"${IP}\",\"relay\":\"${IP}\",\"api\":\"\",\"key\":\"${PUBKEY}\"}"
+    # host=ID服务器(端口21116), relay=中继服务器(IP:21117), api=空(开源版无API)
+    JSON="{\"host\":\"${IP}\",\"relay\":\"${IP}:21117\",\"api\":\"\",\"key\":\"${PUBKEY}\"}"
     # 编码顺序：JSON -> base64url编码 -> 反转base64字符串
     B64=$(echo -n "${JSON}" | base64 -w0 | tr '+/' '-_' | tr -d '=')
     IMPORT_STR=$(echo -n "${B64}" | rev)
     echo "--------------------------"
     echo "ID服务器:   ${IP}"
-    echo "中继服务器: ${IP} (端口21117)"
+    echo "中继服务器: ${IP}:21117"
     echo "公钥Key:    ${PUBKEY}"
     echo ""
     echo "客户端一键导入字符串（全选复制）："
