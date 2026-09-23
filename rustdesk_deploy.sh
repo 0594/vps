@@ -247,9 +247,7 @@ action_import() {
         pause
         return
     fi
-    # host=ID服务器(端口21116), relay=中继服务器(IP:21117), api=空(开源版无API)
     JSON="{\"host\":\"${IP}\",\"relay\":\"${IP}:21117\",\"api\":\"\",\"key\":\"${PUBKEY}\"}"
-    # 编码顺序：JSON -> base64url编码 -> 反转base64字符串
     B64=$(echo -n "${JSON}" | base64 -w0 | tr '+/' '-_' | tr -d '=')
     IMPORT_STR=$(echo -n "${B64}" | rev)
     echo "--------------------------"
@@ -302,10 +300,12 @@ action_download() {
 
 action_active() {
     echo ""
-    echo "最近的hbbs活动日志（最近30条）："
+    echo "当前活跃中继会话（hbbr最近活动）："
     echo "--------------------------"
-    journalctl -u rustdesk-hbbs --no-pager -n 30 2>/dev/null || warn "无法读取日志"
+    journalctl -u rustdesk-hbbr --no-pager -n 20 2>/dev/null | grep -v "^--" | tail -10 || warn "无中继会话"
     echo "--------------------------"
+    echo ""
+    echo "提示：远程窗口右上角显示 Direct=P2P直连(不占服务器) / Relay=中继(走服务器)"
     pause
 }
 
@@ -371,12 +371,15 @@ action_ip() {
 
 action_devices() {
     echo ""
-    echo "设备注册/连接日志（最近50条中筛选）："
+    echo "最近24小时注册/连接的设备（从hbbs日志提取）："
     echo "--------------------------"
-    journalctl -u rustdesk-hbbs --no-pager -n 50 2>/dev/null | grep -i -E "register|login|peer|device|online" || echo "（无相关日志）"
+    journalctl -u rustdesk-hbbs --no-pager --since "24 hours ago" 2>/dev/null \
+        | grep -iE "register|peer|login|id.*[0-9]+" \
+        | sed 's/^.*hbbs\[[0-9]*\]://' \
+        | tail -15 || echo "（无设备注册记录）"
     echo "--------------------------"
     echo ""
-    echo "提示：开源版hbbs不提供完整设备列表API，以上为日志中提取的设备活动"
+    echo "提示：开源版hbbs从日志提取设备活动，包含设备ID和客户端公网IP"
     pause
 }
 
