@@ -191,23 +191,52 @@ get_ip() {
         || echo "获取失败"
 }
 
-# 从hbbs日志提取最近N分钟内有心跳的设备ID集合
-# 返回：空格分隔的设备ID列表
-get_online_ids() {
-    local minutes=${1:-2}
-    journalctl -u rustdesk-hbbs --since "${minutes} minutes ago" --no-pager 2>/dev/null \
+# 从hbbs日志提取设备心跳信息
+# 输出格式：设备ID TAB 最后心跳时间(CST)
+# 不依赖journalctl的--since时间过滤，脚本内部解析日志时间
+get_heartbeat_info() {
+    journalctl -u rustdesk-hbbs --since "10 minutes ago" --no-pager 2>/dev/null \
         | grep 'update_pk' \
-        | awk '{
+        | awk '
+        BEGIN {
+            # 月份缩写转数字
+            m["Jan"]=1; m["Feb"]=2; m["Mar"]=3; m["Apr"]=4; m["May"]=5; m["Jun"]=6;
+            m["Jul"]=7; m["Aug"]=8; m["Sep"]=9; m["Oct"]=10; m["Nov"]=11; m["Dec"]=12;
+        }
+        {
+            # 日志格式：Sep 24 05:04:59 hostname hbbs[1234]: update_pk 1679009027 ...
+            mon = m[$1];
+            day = $2;
+            split($3, t, ":");
+            hour = t[1]; min = t[2]; sec = t[3];
+
+            # 找update_pk位置
+            devid = "";
             for(i=1;i<=NF;i++) {
                 if($i=="update_pk") {
-                    print $(i+1);
+                    devid = $(i+1);
                     break;
                 }
             }
-        }' \
-        | grep -E '^[0-9]+$' \
-        | sort -u \
-        | tr '\n' ' '
+
+            if(devid != "" && devid ~ /^[0-9]+$/) {
+                # 构造时间戳（本年，因为journal不显示年份）
+                # 用mktime: YYYY MM DD HH MM SS
+                now_year = strftime("%Y");
+                ts = mktime(now_year " " mon " " day " " hour " " min " " sec);
+
+                # 只保留每个设备最新的心跳
+                if(!(devid in last_ts) || ts > last_ts[devid]) {
+                    last_ts[devid] = ts;
+                    last_str[devid] = strftime("%Y-%m-%d %H:%M:%S", ts + 8*3600);  # 转CST
+                }
+            }
+        }
+        END {
+            for(id in last_ts) {
+                print id "\t" last_str[id];
+            }
+        }'
 }
 
 show_menu() {
@@ -286,8 +315,8 @@ action_status() {
 action_devices() {
     echo ""
     echo "==== 注册设备列表（读取SQLite数据库） ===="
-    printf "%-15s %-8s %-20s %-15s %s\n" "设备ID" "状态" "注册时间(CST)" "备注" "公网IP"
-    echo "------------------------------------------------------------------------------------"
+    printf "%-15s %-8s %-20s %-20s %-15s %s\n" "设备ID" "状态" "注册时间(CST)" "最后心跳(CST)" "备注" "公网IP"
+    echo "-------------------------------------------------------------------------------------------------------------"
 
     if [ ! -f "${DB_FILE}" ]; then
         echo "（数据库文件不存在，hbbs尚未创建数据库）"
@@ -299,8 +328,11 @@ action_devices() {
     if [ "${count}" = "0" ]; then
         echo "（暂无注册设备）"
     else
-        # 获取最近2分钟有心跳的设备ID集合
-        local online_ids=$(get_online_ids 2)
+        # 获取心跳信息：设备ID TAB 最后心跳时间
+        local heartbeat=$(get_heartbeat_info)
+        # 2分钟阈值（秒）
+        local threshold=120
+        local now_epoch=$(date +%s)
 
         sqlite3 -json "${DB_FILE}" "SELECT id, created_at, note, info FROM peer;" 2>/dev/null \
         | jq -r '.[] | [
@@ -311,17 +343,25 @@ action_devices() {
         ] | @tsv' \
         | sed 's/::ffff://' \
         | while IFS=$'\t' read -r devid cst_time note ip; do
-            # 判断在线状态
+            # 从心跳信息中查找该设备
+            local hb_time=$(echo "${heartbeat}" | grep "^${devid}" | cut -f2)
             local status="离线"
-            if echo "${online_ids}" | grep -qw "${devid}"; then
-                status="在线"
+            local hb_display="-"
+            if [ -n "${hb_time}" ]; then
+                hb_display="${hb_time}"
+                # 计算心跳时间和当前时间的差值
+                local hb_epoch=$(date -d "${hb_time}" +%s 2>/dev/null || echo 0)
+                local diff=$((now_epoch - hb_epoch))
+                if [ ${diff} -le ${threshold} ]; then
+                    status="在线"
+                fi
             fi
-            printf "%-15s %-8s %-20s %-15s %s\n" "$devid" "$status" "$cst_time" "$note" "$ip"
+            printf "%-15s %-8s %-20s %-20s %-15s %s\n" "$devid" "$status" "$cst_time" "$hb_display" "$note" "$ip"
         done
     fi
 
-    echo "------------------------------------------------------------------------------------"
-    echo "提示：在线=最近2分钟内有update_pk心跳；备注可在选项3修改"
+    echo "-------------------------------------------------------------------------------------------------------------"
+    echo "提示：在线=2分钟内有update_pk心跳；备注可在选项3修改"
     pause
 }
 
@@ -395,38 +435,43 @@ action_online_probe() {
         return
     fi
 
-    echo "原理：读取hbbs最近2分钟日志，提取update_pk心跳设备ID"
-    echo "      关联sqlite数据库显示设备备注和IP"
+    echo "原理：读取hbbs最近10分钟日志，提取update_pk心跳设备"
+    echo "      2分钟内有心跳=在线，关联sqlite显示备注和IP"
     echo ""
 
-    # 获取在线设备ID
-    local online_ids=$(get_online_ids 2)
-    local online_count=$(echo "${online_ids}" | wc -w)
+    local heartbeat=$(get_heartbeat_info)
+    local threshold=120
+    local now_epoch=$(date +%s)
+    local online_count=0
 
-    if [ "${online_count}" = "0" ]; then
-        echo "（最近2分钟无update_pk心跳记录）"
+    if [ -z "${heartbeat}" ]; then
+        echo "（最近10分钟无update_pk心跳记录）"
         echo ""
         echo "可能原因："
         echo "1. 所有设备离线"
-        echo "2. hbbs未输出update_pk日志（版本差异）"
-        echo "3. 客户端心跳间隔较长，可等待后重试"
+        echo "2. hbbs未输出update_pk日志"
         echo ""
         echo "手动验证命令："
-        echo "  journalctl -u rustdesk-hbbs --since '2 minutes ago' | grep update_pk"
+        echo "  journalctl -u rustdesk-hbbs | grep update_pk"
     else
-        echo "==== 在线设备列表（最近2分钟心跳） ===="
-        printf "%-15s %-15s %s\n" "设备ID" "备注" "公网IP"
+        echo "==== 在线设备列表 ===="
+        printf "%-15s %-20s %-15s %s\n" "设备ID" "最后心跳(CST)" "备注" "公网IP"
         echo "-------------------------------------------------------------------------"
 
-        # 遍历在线设备ID，关联sqlite获取备注和IP
-        for devid in ${online_ids}; do
-            local note=$(sqlite3 "${DB_FILE}" "SELECT note FROM peer WHERE id='${devid}';" 2>/dev/null)
-            local info=$(sqlite3 "${DB_FILE}" "SELECT info FROM peer WHERE id='${devid}';" 2>/dev/null)
-            local ip=$(echo "${info}" | jq -r '.ip // "-"' 2>/dev/null | sed 's/::ffff://')
-            [ -z "${note}" ] && note="-"
-            [ -z "${ip}" ] && ip="-"
-            printf "%-15s %-15s %s\n" "$devid" "$note" "$ip"
-        done
+        while IFS=$'\t' read -r devid hb_time; do
+            [ -z "${devid}" ] && continue
+            local hb_epoch=$(date -d "${hb_time}" +%s 2>/dev/null || echo 0)
+            local diff=$((now_epoch - hb_epoch))
+            if [ ${diff} -le ${threshold} ]; then
+                online_count=$((online_count + 1))
+                local note=$(sqlite3 "${DB_FILE}" "SELECT note FROM peer WHERE id='${devid}';" 2>/dev/null)
+                local info=$(sqlite3 "${DB_FILE}" "SELECT info FROM peer WHERE id='${devid}';" 2>/dev/null)
+                local ip=$(echo "${info}" | jq -r '.ip // "-"' 2>/dev/null | sed 's/::ffff://')
+                [ -z "${note}" ] && note="-"
+                [ -z "${ip}" ] && ip="-"
+                printf "%-15s %-20s %-15s %s\n" "$devid" "$hb_time" "$note" "$ip"
+            fi
+        done <<< "${heartbeat}"
 
         echo "-------------------------------------------------------------------------"
         echo "在线设备数：${online_count}"
