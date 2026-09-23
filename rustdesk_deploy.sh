@@ -35,9 +35,9 @@ if [ ! -f "${WORK_DIR}/hbbs" ]; then
     echo "============================================"
     echo ""
 
-    info "安装依赖 (wget, unzip, ufw)..."
+    info "安装依赖 (wget, unzip, ufw, sqlite3)..."
     apt-get update -qq
-    apt-get install -y -qq wget unzip ufw > /dev/null 2>&1
+    apt-get install -y -qq wget unzip ufw sqlite3 > /dev/null 2>&1
 
     info "创建工作目录 ${WORK_DIR}..."
     mkdir -p ${WORK_DIR}
@@ -171,6 +171,17 @@ get_ip() {
         || echo "获取失败"
 }
 
+# 自动探测db文件
+find_db() {
+    for f in "${WORK_DIR}/db_v2.sqlite3" "${WORK_DIR}/db.sqlite3" "${WORK_DIR}/db_v2" "${WORK_DIR}/db"; do
+        if [ -f "$f" ]; then
+            echo "$f"
+            return
+        fi
+    done
+    echo ""
+}
+
 show_menu() {
     clear
     echo "==================== RustDesk 自建服务管理 ===================="
@@ -300,19 +311,14 @@ action_download() {
 
 action_active() {
     echo ""
-    echo "--- 当前活跃中继会话 ---"
-    echo "主控端ID           被控端ID           客户端IP"
+    echo "--- 当前活跃中继会话（最近10分钟） ---"
     echo "---------------------------------------------------------"
-    # 优先用hbbs数据库查询活跃连接
-    CONN_OUTPUT=$(${WORK_DIR}/hbbs -p ${WORK_DIR}/db list-conn 2>/dev/null || echo "")
-    if [ -n "${CONN_OUTPUT}" ]; then
-        echo "${CONN_OUTPUT}" | awk '/^[0-9]+/ {printf "%-18s %-18s %s\n", $1, $2, $3}'
-    else
-        # 回退：从hbbr日志提取最近中继活动
-        journalctl -u rustdesk-hbbr --no-pager -n 15 2>/dev/null | grep -v "^--" | tail -8 || echo "（无活跃中继会话）"
-    fi
+    journalctl -u rustdesk-hbbr --no-pager --since "10 minutes ago" 2>/dev/null \
+        | grep -iE "relay|session|connect|close" \
+        | sed 's/^.*hbbr\[[0-9]*\]://' \
+        | tail -10 || echo "（无活跃中继会话）"
     echo "---------------------------------------------------------"
-    echo "提示：远程窗口右上角 Direct=P2P直连(不占服务器) / Relay=中继(走服务器)"
+    echo "提示：远程窗口右上角 Direct=P2P直连 / Relay=中继(走服务器)"
     pause
 }
 
@@ -378,26 +384,46 @@ action_ip() {
 
 action_devices() {
     echo ""
-    echo "--- 全部注册设备（含离线） ---"
-    echo "设备ID           公网IP                在线状态"
+    echo "--- 全部注册设备（SQLite读取，含离线） ---"
+    echo "设备ID           公网IP                状态"
     echo "---------------------------------------------------------"
-    # 优先用hbbs数据库查询设备列表
-    DEV_OUTPUT=$(${WORK_DIR}/hbbs -p ${WORK_DIR}/db list-dev 2>/dev/null || echo "")
-    if [ -n "${DEV_OUTPUT}" ]; then
-        echo "${DEV_OUTPUT}" | awk '/^[0-9]+/ {
-            id=$1; ip=$2;
-            status=($3=="true")?"在线":"离线";
-            printf "%-15s %-20s %s\n", id, ip, status
-        }'
-    else
-        # 回退：从hbbs日志提取最近24小时设备注册
+
+    DB_FILE=$(find_db)
+    if [ -z "${DB_FILE}" ]; then
+        warn "未找到数据库文件，回退到日志模式"
         journalctl -u rustdesk-hbbs --no-pager --since "24 hours ago" 2>/dev/null \
-            | grep -iE "register|peer|login" \
-            | sed 's/^.*hbbs\[[0-9]*\]://' \
-            | tail -12 || echo "（无设备注册记录）"
+            | grep 'update_pk' \
+            | awk '{id=$10; ip=$11; gsub(/\[::ffff:/,"",ip); gsub(/\]:.*/,"",ip); print id"  "ip}' \
+            | sort -u || echo "（无数据）"
+    elif ! command -v sqlite3 > /dev/null 2>&1; then
+        warn "sqlite3未安装，回退到日志模式"
+        journalctl -u rustdesk-hbbs --no-pager --since "24 hours ago" 2>/dev/null \
+            | grep 'update_pk' \
+            | awk '{id=$10; ip=$11; gsub(/\[::ffff:/,"",ip); gsub(/\]:.*/,"",ip); print id"  "ip}' \
+            | sort -u || echo "（无数据）"
+    else
+        # 尝试查询peer表
+        SQL_RESULT=$(sqlite3 "${DB_FILE}" "SELECT id, info, status FROM peer ORDER BY status DESC;" 2>/dev/null || echo "")
+        if [ -z "${SQL_RESULT}" ]; then
+            # 尝试其他表名
+            SQL_RESULT=$(sqlite3 "${DB_FILE}" ".tables" 2>/dev/null)
+            warn "peer表查询失败，数据库表：${SQL_RESULT}"
+            echo "回退到日志模式："
+            journalctl -u rustdesk-hbbs --no-pager --since "24 hours ago" 2>/dev/null \
+                | grep 'update_pk' \
+                | awk '{id=$10; ip=$11; gsub(/\[::ffff:/,"",ip); gsub(/\]:.*/,"",ip); print id"  "ip}' \
+                | sort -u || echo "（无数据）"
+        else
+            echo "${SQL_RESULT}" | while IFS='|' read -r id info status; do
+                # 从info JSON中提取IP
+                ip=$(echo "${info}" | grep -oP '"ip":"[^"]*"' | head -1 | cut -d'"' -f4)
+                [ -z "${ip}" ] && ip="未知"
+                [ "${status}" = "1" ] && st="在线" || st="离线"
+                printf "%-15s %-20s %s\n" "${id}" "${ip}" "${st}"
+            done
+        fi
     fi
     echo "---------------------------------------------------------"
-    echo "提示：从hbbs数据库读取，包含设备ID、客户端公网IP和在线状态"
     pause
 }
 
