@@ -184,7 +184,7 @@ show_menu() {
     echo "5.  生成客户端一键导入串"
     echo "6.  客户端下载地址"
     echo "7.  查看当前活跃远程连接"
-    echo "8.  卸载RustDesk（停止服务+删文件+关闭防火墙端口）"
+    echo "8.  卸载RustDesk（完全清理：服务+文件+防火墙+本命令）"
     echo "9.  查看监听端口"
     echo "10. 获取服务器公网IP"
     echo "11. 查询所有注册设备（含离线）"
@@ -308,15 +308,15 @@ action_active() {
 
 action_uninstall() {
     echo ""
-    warn "即将卸载RustDesk Server！"
-    echo "操作：停止服务 → 删除systemd → 删除文件 → 关闭防火墙"
+    warn "即将完全卸载RustDesk Server！"
+    echo "将删除：服务 → systemd文件 → 程序目录 → 防火墙端口 → 本菜单命令"
     read -p "确认卸载？输入 yes 继续：" CONFIRM
     if [ "${CONFIRM}" = "yes" ]; then
         echo ""
         info "停止并禁用服务..."
         systemctl stop rustdesk-hbbs rustdesk-hbbr 2>/dev/null || true
         systemctl disable rustdesk-hbbs rustdesk-hbbr 2>/dev/null || true
-        info "删除systemd文件..."
+        info "删除systemd服务文件..."
         rm -f /etc/systemd/system/rustdesk-hbbs.service
         rm -f /etc/systemd/system/rustdesk-hbbr.service
         systemctl daemon-reload
@@ -325,10 +325,16 @@ action_uninstall() {
         ufw delete allow 21116/tcp 2>/dev/null || true
         ufw delete allow 21116/udp 2>/dev/null || true
         ufw delete allow 21117/tcp 2>/dev/null || true
-        info "删除文件..."
+        info "删除程序目录 ${WORK_DIR}..."
         rm -rf ${WORK_DIR}
+        info "删除管理命令 /usr/local/bin/rustdesk..."
         rm -f /usr/local/bin/rustdesk
-        ok "RustDesk已完全卸载"
+        info "清理临时文件..."
+        rm -rf /tmp/rustdesk* 2>/dev/null || true
+        echo ""
+        ok "RustDesk已完全卸载，所有文件已清理"
+        echo "如需重新安装，运行："
+        echo "  wget -O /root/rustdesk_deploy.sh https://raw.githubusercontent.com/0594/vps/main/rustdesk_deploy.sh && chmod +x /root/rustdesk_deploy.sh && bash /root/rustdesk_deploy.sh"
         exit 0
     else
         info "已取消"
