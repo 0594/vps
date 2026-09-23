@@ -212,13 +212,45 @@ pause() {
     read -p "按回车返回菜单..."
 }
 
+# 获取服务摘要信息
+svc_summary() {
+    local svc=$1
+    local status=$(systemctl is-active ${svc} 2>/dev/null || echo "未安装")
+    local pid=$(systemctl show ${svc} -p MainPID --value 2>/dev/null || echo "-")
+    local uptime=$(systemctl show ${svc} -p ActiveEnterTimestamp --value 2>/dev/null || echo "-")
+    local mem=$(systemctl show ${svc} -p MemoryCurrent --value 2>/dev/null || echo "-")
+    [ "${mem}" = "not-found" ] && mem="-"
+    [ "${pid}" = "0" ] && pid="-"
+    printf "  状态: %-10s PID: %-8s 内存: %-8s 启动: %s\n" "${status}" "${pid}" "${mem}" "${uptime}"
+}
+
 action_status() {
     echo ""
-    echo "--- hbbs ---"
-    systemctl status rustdesk-hbbs --no-pager -l 2>/dev/null || warn "hbbs未安装"
+    echo "==== 服务状态摘要 ===="
     echo ""
-    echo "--- hbbr ---"
-    systemctl status rustdesk-hbbr --no-pager -l 2>/dev/null || warn "hbbr未安装"
+    echo "--- hbbs (ID/信标服务器) ---"
+    svc_summary "rustdesk-hbbs"
+    echo ""
+    echo "--- hbbr (中继服务器) ---"
+    svc_summary "rustdesk-hbbr"
+    echo ""
+    echo "提示：按回车展开最近20条事件日志（自动过滤启动杂项）"
+    read -r
+    echo ""
+    echo "--- hbbs 最近日志 ---"
+    journalctl -u rustdesk-hbbs -n 20 --no-pager 2>/dev/null \
+        | grep -iE "update_pk|peer|register|login" \
+        | sed 's/::ffff://g' \
+        | sed 's/^.*hbbs\[[0-9]*\]://' \
+        | tail -10 || echo "（无日志）"
+    echo ""
+    echo "--- hbbr 最近日志 ---"
+    journalctl -u rustdesk-hbbr -n 20 --no-pager 2>/dev/null \
+        | grep -iE "relay conn|session|connect|close" \
+        | grep -vE "Listening|blacklist|blocklist|DOWNGRADE|LIMIT_SPEED|BANDWIDTH" \
+        | sed 's/::ffff://g' \
+        | sed 's/^.*hbbr\[[0-9]*\]://' \
+        | tail -10 || echo "（无日志）"
     pause
 }
 
@@ -311,14 +343,17 @@ action_download() {
 
 action_active() {
     echo ""
-    echo "--- 当前活跃中继会话（最近10分钟） ---"
-    echo "---------------------------------------------------------"
-    journalctl -u rustdesk-hbbr --no-pager --since "10 minutes ago" 2>/dev/null \
+    echo "==== 当前活跃中继会话 ===="
+    echo "说明：远程窗口右上角 Direct=P2P直连(不走服务器) / Relay=中继(走服务器)"
+    echo ""
+    echo "提示：按回车展开最近10分钟中继连接日志"
+    read -r
+    echo ""
+    journalctl -u rustdesk-hbbr --since "10 minutes ago" --no-pager 2>/dev/null \
         | grep -i 'relay conn' \
+        | sed 's/::ffff://g' \
         | sed 's/^.*hbbr\[[0-9]*\]://' \
         | tail -10 || echo "（无活跃中继会话）"
-    echo "---------------------------------------------------------"
-    echo "提示：远程窗口右上角 Direct=P2P直连 / Relay=中继(走服务器)"
     pause
 }
 
@@ -360,10 +395,8 @@ action_uninstall() {
 
 action_ports() {
     echo ""
-    echo "监听端口："
-    echo "--------------------------"
+    echo "==== 监听端口 ===="
     ss -tulnp | grep -E "hbbs|hbbr" || warn "未找到hbbs/hbbr进程"
-    echo "--------------------------"
     echo ""
     echo "预期端口："
     echo "  21115/tcp - NAT类型测试"
@@ -376,15 +409,13 @@ action_ports() {
 action_ip() {
     echo ""
     IP=$(get_ip)
-    echo "--------------------------"
     echo "服务器公网IP：${IP}"
-    echo "--------------------------"
     pause
 }
 
 action_devices() {
     echo ""
-    echo "--- 全部注册设备（SQLite读取，含离线） ---"
+    echo "==== 全部注册设备（SQLite读取，含离线） ===="
     echo "设备ID           公网IP                状态"
     echo "---------------------------------------------------------"
 
@@ -414,7 +445,6 @@ action_devices() {
         else
             echo "${SQL_RESULT}" | while IFS='|' read -r id info status; do
                 ip=$(echo "${info}" | grep -oP '"ip":"[^"]*"' | head -1 | cut -d'"' -f4)
-                # 清除::ffff:IPv6映射前缀
                 ip=$(echo "${ip}" | sed 's/^::ffff://')
                 [ -z "${ip}" ] && ip="未知"
                 [ "${status}" = "1" ] && st="在线" || st="离线"
@@ -428,34 +458,33 @@ action_devices() {
 
 action_test() {
     echo ""
-    echo "本地端口连通性测试："
-    echo "--------------------------"
+    echo "==== 本地端口连通性测试 ===="
     ss -tln | grep -q ":21115 " && ok "21115/tcp 监听中" || err "21115/tcp 未监听"
     ss -tln | grep -q ":21116 " && ok "21116/tcp 监听中" || err "21116/tcp 未监听"
     ss -uln | grep -q ":21116 " && ok "21116/udp 监听中" || err "21116/udp 未监听"
     ss -tln | grep -q ":21117 " && ok "21117/tcp 监听中" || err "21117/tcp 未监听"
-    echo "--------------------------"
     pause
 }
 
 action_logs() {
     echo ""
-    echo "实时日志（按 Ctrl+C 退出）..."
-    echo "--------------------------"
-    journalctl -u rustdesk-hbbs -u rustdesk-hbbr -f
+    echo "==== 实时日志（按 Ctrl+C 退出） ===="
+    echo "提示：IP已自动清理::ffff:前缀"
+    echo ""
+    journalctl -u rustdesk-hbbs -u rustdesk-hbbr -f 2>/dev/null | sed 's/::ffff://g'
+    echo ""
+    pause
 }
 
 action_pubkey() {
     echo ""
     PUBKEY=$(get_pubkey)
-    echo "--------------------------"
     echo "公钥Key（直接复制下面整行）："
     echo ""
     echo "${PUBKEY}"
     echo ""
     echo "👉 粘贴到RustDesk客户端【Key】框"
     echo "⚠️ 不要复制多余空行/空格"
-    echo "--------------------------"
     pause
 }
 
