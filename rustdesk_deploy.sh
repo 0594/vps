@@ -157,7 +157,7 @@ EOF
         echo ""
         echo "  使用方法：打开RustDesk客户端 → 设置 → 网络 → 点【导入服务器配置】粘贴"
     else
-        echo "  导入串生成失败，运行 rustdesk → 选项4 重新生成"
+        echo "  导入串生成失败，运行 rustdesk → 选项5 重新生成"
     fi
     echo ""
     echo "  运行 rustdesk 命令打开管理菜单"
@@ -174,6 +174,7 @@ cat > ${RD_CMD} << 'MENUEOF'
 # RustDesk 管理菜单
 WORK_DIR="/opt/rustdesk"
 IP_API="icanhazip.com"
+DB_FILE="${WORK_DIR}/db_v2.sqlite3"
 
 info()  { echo -e "\033[1;34m[INFO]\033[0m $*"; }
 ok()    { echo -e "\033[1;32m[OK]\033[0m $*"; }
@@ -197,18 +198,19 @@ show_menu() {
     echo "公钥路径：${WORK_DIR}/id_ed25519.pub"
     echo ""
     echo "1.  查看服务状态"
-    echo "2.  注册设备列表（含离线）"
-    echo "3.  活跃远程连接"
-    echo "4.  生成客户端一键导入串（含公钥）"
-    echo "5.  客户端下载地址"
-    echo "6.  启动服务"
-    echo "7.  停止服务"
-    echo "8.  重启服务"
-    echo "9.  端口连通测试"
-    echo "10. 查看监听端口"
-    echo "11. 获取服务器公网IP"
-    echo "12. 实时日志"
-    echo "13. 卸载RustDesk（完全清理）"
+    echo "2.  注册设备列表（含备注）"
+    echo "3.  修改设备备注"
+    echo "4.  活跃远程连接"
+    echo "5.  生成客户端一键导入串（含公钥）"
+    echo "6.  客户端下载地址"
+    echo "7.  启动服务"
+    echo "8.  停止服务"
+    echo "9.  重启服务"
+    echo "10. 端口连通测试"
+    echo "11. 查看监听端口"
+    echo "12. 获取服务器公网IP"
+    echo "13. 实时日志"
+    echo "14. 卸载RustDesk（完全清理）"
     echo "0.  退出"
     echo "==============================================================="
     read -p "请输入选项：" CHOICE
@@ -264,10 +266,8 @@ action_status() {
 action_devices() {
     echo ""
     echo "==== 注册设备列表（读取SQLite数据库） ===="
-    printf "%-15s %s\n" "设备ID" "公网IP"
-    echo "-----------------------------------------"
-
-    DB_FILE="${WORK_DIR}/db_v2.sqlite3"
+    printf "%-15s %-20s %-15s %s\n" "设备ID" "注册时间(CST)" "备注" "公网IP"
+    echo "-------------------------------------------------------------------------"
 
     if [ ! -f "${DB_FILE}" ]; then
         echo "（数据库文件不存在，hbbs尚未创建数据库）"
@@ -275,21 +275,82 @@ action_devices() {
         return
     fi
 
-    # 从peer表读取设备ID和info（JSON包含IP）
-    sqlite3 -json "${DB_FILE}" "SELECT id, info FROM peer;" 2>/dev/null \
-        | jq -r '.[] | [.id, (.info | fromjson).ip // "-"] | @tsv' \
-        | sed 's/::ffff://' \
-        | while IFS=$'\t' read -r devid ip; do
-            printf "%-15s %s\n" "$devid" "$ip"
-        done
-
-    # 如果没有任何输出，显示空提示
-    if [ -z "$(sqlite3 "${DB_FILE}" "SELECT id FROM peer;" 2>/dev/null)" ]; then
+    local count=$(sqlite3 "${DB_FILE}" "SELECT count(*) FROM peer;" 2>/dev/null)
+    if [ "${count}" = "0" ]; then
         echo "（暂无注册设备）"
+    else
+        sqlite3 -json "${DB_FILE}" "SELECT id, created_at, note, info FROM peer;" 2>/dev/null \
+        | jq -r '.[] | [
+            .id,
+            (.created_at | strptime("%Y-%m-%d %H:%M:%S") | mktime | . + (8*3600) | strftime("%Y-%m-%d %H:%M:%S")),
+            (.note // "-"),
+            (.info | fromjson).ip // "-"
+        ] | @tsv' \
+        | sed 's/::ffff://' \
+        | while IFS=$'\t' read -r devid cst_time note ip; do
+            printf "%-15s %-20s %-15s %s\n" "$devid" "$cst_time" "$note" "$ip"
+        done
     fi
 
-    echo "-----------------------------------------"
-    echo "提示：从hbbs数据库读取设备注册信息"
+    echo "-------------------------------------------------------------------------"
+    echo "提示：注册时间为北京时间(CST)，备注可在选项3修改"
+    pause
+}
+
+action_note() {
+    echo ""
+    echo "==== 修改设备备注 ===="
+
+    if [ ! -f "${DB_FILE}" ]; then
+        err "数据库文件不存在"
+        pause
+        return
+    fi
+
+    # 先列出所有设备
+    echo "当前设备列表："
+    echo "-------------------------------------------------------------------------"
+    printf "%-15s %-15s %s\n" "设备ID" "当前备注" "公网IP"
+    echo "-------------------------------------------------------------------------"
+    sqlite3 -json "${DB_FILE}" "SELECT id, note, info FROM peer;" 2>/dev/null \
+        | jq -r '.[] | [.id, (.note // "-"), (.info | fromjson).ip // "-"] | @tsv' \
+        | sed 's/::ffff://' \
+        | while IFS=$'\t' read -r devid note ip; do
+            printf "%-15s %-15s %s\n" "$devid" "$note" "$ip"
+        done
+    echo "-------------------------------------------------------------------------"
+
+    echo ""
+    read -p "输入要修改的设备ID：" TARGET_ID
+    if [ -z "${TARGET_ID}" ]; then
+        warn "设备ID不能为空"
+        pause
+        return
+    fi
+
+    # 确认设备存在
+    local exist=$(sqlite3 "${DB_FILE}" "SELECT count(*) FROM peer WHERE id='${TARGET_ID}';" 2>/dev/null)
+    if [ "${exist}" = "0" ]; then
+        err "设备ID ${TARGET_ID} 不存在"
+        pause
+        return
+    fi
+
+    local old_note=$(sqlite3 "${DB_FILE}" "SELECT note FROM peer WHERE id='${TARGET_ID}';" 2>/dev/null)
+    [ -z "${old_note}" ] && old_note="（空）"
+    echo "当前备注：${old_note}"
+    echo "直接输入新备注（留空回车=清空备注）"
+    read -p "新备注：" NEW_NOTE
+
+    if [ -z "${NEW_NOTE}" ]; then
+        sqlite3 "${DB_FILE}" "UPDATE peer SET note = NULL WHERE id='${TARGET_ID}';"
+        ok "已清空设备 ${TARGET_ID} 的备注"
+    else
+        # 转义单引号
+        NEW_NOTE_ESC=$(echo "${NEW_NOTE}" | sed "s/'/''/g")
+        sqlite3 "${DB_FILE}" "UPDATE peer SET note = '${NEW_NOTE_ESC}' WHERE id='${TARGET_ID}';"
+        ok "设备 ${TARGET_ID} 备注已更新为：${NEW_NOTE}"
+    fi
     pause
 }
 
@@ -478,17 +539,18 @@ while true; do
     case ${CHOICE} in
         1) action_status ;;
         2) action_devices ;;
-        3) action_active ;;
-        4) action_import ;;
-        5) action_download ;;
-        6) action_start ;;
-        7) action_stop ;;
-        8) action_restart ;;
-        9) action_test ;;
-        10) action_ports ;;
-        11) action_ip ;;
-        12) action_logs ;;
-        13) action_uninstall ;;
+        3) action_note ;;
+        4) action_active ;;
+        5) action_import ;;
+        6) action_download ;;
+        7) action_start ;;
+        8) action_stop ;;
+        9) action_restart ;;
+        10) action_test ;;
+        11) action_ports ;;
+        12) action_ip ;;
+        13) action_logs ;;
+        14) action_uninstall ;;
         0) echo "退出"; exit 0 ;;
         *) warn "无效选项" ;;
     esac
