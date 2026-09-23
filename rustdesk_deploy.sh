@@ -130,7 +130,7 @@ EOF
     ufw allow 21117/tcp comment 'RustDesk Relay' > /dev/null 2>&1 || true
 
     if [ -f "${WORK_DIR}/id_ed25519.pub" ]; then
-        PUBKEY=$(cat ${WORK_DIR}/id_ed25519.pub)
+        PUBKEY=$(tr -d '\n' < ${WORK_DIR}/id_ed25519.pub)
     else
         PUBKEY="未生成（请检查hbbs服务状态）"
     fi
@@ -162,7 +162,7 @@ warn()  { echo -e "\033[1;33m[WARN]\033[0m $*"; }
 err()   { echo -e "\033[1;31m[ERROR]\033[0m $*"; }
 
 get_pubkey() {
-    cat ${WORK_DIR}/id_ed25519.pub 2>/dev/null
+    tr -d '\n' < ${WORK_DIR}/id_ed25519.pub 2>/dev/null
 }
 
 get_ip() {
@@ -247,7 +247,8 @@ action_import() {
         pause
         return
     fi
-    JSON="{\"host\":\"${IP}\",\"relay\":\"${IP}\",\"api\":\"\",\"key\":\"${PUBKEY}\"}"
+    # 正确格式：relay留空，客户端自动从hbbs获取中继地址
+    JSON="{\"host\":\"${IP}\",\"relay\":\"\",\"api\":\"\",\"key\":\"${PUBKEY}\"}"
     REVERSED=$(echo -n "${JSON}" | rev)
     IMPORT_STR=$(echo -n "${REVERSED}" | base64 -w0 | tr '+/' '-_' | tr -d '=')
     echo "--------------------------"
