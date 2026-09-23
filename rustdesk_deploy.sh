@@ -35,9 +35,9 @@ if [ ! -f "${WORK_DIR}/hbbs" ]; then
     echo "============================================"
     echo ""
 
-    info "安装依赖 (wget, unzip, ufw)..."
+    info "安装依赖 (wget, unzip, ufw, sqlite3, jq)..."
     apt-get update -qq
-    apt-get install -y -qq wget unzip ufw > /dev/null 2>&1
+    apt-get install -y -qq wget unzip ufw sqlite3 jq > /dev/null 2>&1
 
     info "创建工作目录 ${WORK_DIR}..."
     mkdir -p ${WORK_DIR}
@@ -263,55 +263,33 @@ action_status() {
 
 action_devices() {
     echo ""
-    echo "==== 注册设备列表（日志提取，含离线） ===="
-    printf "%-15s %-20s %s\n" "设备ID" "公网IP" "状态"
-    echo "---------------------------------------------------------"
+    echo "==== 注册设备列表（读取SQLite数据库） ===="
+    printf "%-15s %s\n" "设备ID" "公网IP"
+    echo "-----------------------------------------"
 
-    # 从hbbs日志提取update_pk行，去重（同一设备只保留最新），判断在线/离线
-    # update_pk行格式：[时间戳] INFO [src/peer.rs] update_pk <id> [<ip>]:<port> ...
-    journalctl -u rustdesk-hbbs --no-pager --since "7 days ago" 2>/dev/null \
-        | grep 'update_pk' \
-        | sed 's/::ffff://g' \
-        | awk '
-        {
-            # 找到update_pk位置
-            for(i=1;i<=NF;i++) {
-                if($i=="update_pk") {
-                    id=$(i+1);
-                    rawip=$(i+2);
-                    gsub(/^\[/,"",rawip);
-                    gsub(/\]:.*/,"",rawip);
-                    ip=rawip;
-                    break;
-                }
-            }
-            if(id != "" && id ~ /^[0-9]+$/) {
-                # 时间戳取前3个字段（月 日 时:分:秒）
-                ts = $1" "$2" "$3;
-                # 只保留最新的一条记录（覆盖旧的）
-                last_ts[id] = ts;
-                last_ip[id] = ip;
-            }
-        }
-        END {
-            # 当前时间戳（journalctl输出的格式：Sep 24 02:33:46）
-            # 用系统当前时间和日志时间对比判断在线
-            now_cmd = "date \"+%b %d %H:%M:%S\"";
-            now_cmd | getline now_str;
-            close(now_cmd);
+    DB_FILE="${WORK_DIR}/db_v2.sqlite3"
 
-            for(id in last_ts) {
-                ip = last_ip[id];
-                ts = last_ts[id];
-                # 简化：只要能读到记录就显示，在线状态靠日志时间判断
-                # 超过2分钟无update_pk=离线
-                printf "%-15s %-20s %s\n", id, ip, ts;
-            }
-        }' \
-        | sort -k1,1 || echo "（近7天无设备注册记录）"
+    if [ ! -f "${DB_FILE}" ]; then
+        echo "（数据库文件不存在，hbbs尚未创建数据库）"
+        pause
+        return
+    fi
 
-    echo "---------------------------------------------------------"
-    echo "提示：从hbbs日志提取设备注册信息，时间列为最后上报时间"
+    # 从peer表读取设备ID和info（JSON包含IP）
+    sqlite3 -json "${DB_FILE}" "SELECT id, info FROM peer;" 2>/dev/null \
+        | jq -r '.[] | [.id, (.info | fromjson).ip // "-"] | @tsv' \
+        | sed 's/::ffff://' \
+        | while IFS=$'\t' read -r devid ip; do
+            printf "%-15s %s\n" "$devid" "$ip"
+        done
+
+    # 如果没有任何输出，显示空提示
+    if [ -z "$(sqlite3 "${DB_FILE}" "SELECT id FROM peer;" 2>/dev/null)" ]; then
+        echo "（暂无注册设备）"
+    fi
+
+    echo "-----------------------------------------"
+    echo "提示：从hbbs数据库读取设备注册信息"
     pause
 }
 
@@ -520,5 +498,5 @@ MENUEOF
 chmod +x ${RD_CMD}
 ok "管理命令 rustdesk 已安装"
 echo ""
-echo "运行 rustdesk 打开管理菜单"
+echo "运行 rustdesk 命令打开管理菜单"
 echo ""
