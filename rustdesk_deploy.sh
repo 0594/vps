@@ -135,11 +135,30 @@ EOF
         PUBKEY="未生成（请检查hbbs服务状态）"
     fi
 
+    # 生成一键导入串
+    if [ -n "${PUBLIC_IP}" ] && [ -n "${PUBKEY}" ] && [ "${PUBKEY}" != "未生成（请检查hbbs服务状态）" ]; then
+        JSON_STR="{\"host\":\"${PUBLIC_IP}\",\"relay\":\"${PUBLIC_IP}:21117\",\"api\":\"\",\"key\":\"${PUBKEY}\"}"
+        B64_STR=$(echo -n "${JSON_STR}" | base64 -w0 | tr '+/' '-_' | tr -d '=')
+        IMPORT_STR=$(echo -n "${B64_STR}" | rev)
+    else
+        IMPORT_STR=""
+    fi
+
     echo ""
     ok "RustDesk Server 安装完成！"
     echo ""
     echo "  公网IP:   ${PUBLIC_IP}"
     echo "  公钥Key:  ${PUBKEY}"
+    echo ""
+    if [ -n "${IMPORT_STR}" ]; then
+        echo "  客户端一键导入串（全选复制）："
+        echo ""
+        echo "  ${IMPORT_STR}"
+        echo ""
+        echo "  使用方法：打开RustDesk客户端 → 设置 → 网络 → 点【导入服务器配置】粘贴"
+    else
+        echo "  导入串生成失败，运行 rustdesk → 选项4 重新生成"
+    fi
     echo ""
     echo "  运行 rustdesk 命令打开管理菜单"
     echo ""
