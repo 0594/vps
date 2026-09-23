@@ -15,10 +15,8 @@ ok()    { echo -e "\033[1;32m[OK]\033[0m $*"; }
 warn()  { echo -e "\033[1;33m[WARN]\033[0m $*"; }
 err()   { echo -e "\033[1;31m[ERROR]\033[0m $*"; }
 
-# 检查root
 [ "$(id -u)" -ne 0 ] && { err "必须用root运行"; exit 1; }
 
-# 获取公网IP
 get_public_ip() {
     wget -qO- --timeout=5 "${IP_API}" 2>/dev/null \
         || wget -qO- --timeout=5 "api.ipify.org" 2>/dev/null \
@@ -35,11 +33,10 @@ if [ ! -f "${WORK_DIR}/hbbs" ]; then
     echo "============================================"
     echo ""
 
-    info "安装依赖 (wget, unzip, ufw, sqlite3, jq)..."
+    info "安装依赖..."
     apt-get update -qq
     apt-get install -y -qq wget unzip ufw sqlite3 jq > /dev/null 2>&1
 
-    info "创建工作目录 ${WORK_DIR}..."
     mkdir -p ${WORK_DIR}
 
     ARCH=$(uname -m)
@@ -51,15 +48,13 @@ if [ ! -f "${WORK_DIR}/hbbs" ]; then
 
     BIN_URL="https://github.com/rustdesk/rustdesk-server/releases/download/${RD_VERSION}/rustdesk-server-linux-${BIN_ARCH}.zip"
 
-    info "下载 RustDesk Server (${BIN_ARCH})..."
+    info "下载 RustDesk Server..."
     cd /tmp
     wget -q --show-progress -O rustdesk-server.zip "${BIN_URL}"
     unzip -o rustdesk-server.zip -d /tmp/rustdesk-src > /dev/null
 
-    HBBS_PATH=$(find /tmp/rustdesk-src -name hbbs -type f | head -1)
-    HBBR_PATH=$(find /tmp/rustdesk-src -name hbbr -type f | head -1)
-    cp "${HBBS_PATH}" ${WORK_DIR}/hbbs
-    cp "${HBBR_PATH}" ${WORK_DIR}/hbbr
+    cp $(find /tmp/rustdesk-src -name hbbs -type f | head -1) ${WORK_DIR}/hbbs
+    cp $(find /tmp/rustdesk-src -name hbbr -type f | head -1) ${WORK_DIR}/hbbr
     chmod +x ${WORK_DIR}/hbbs ${WORK_DIR}/hbbr
     rm -rf /tmp/rustdesk-server.zip /tmp/rustdesk-src
 
@@ -78,7 +73,6 @@ if [ ! -f "${WORK_DIR}/hbbs" ]; then
 [Unit]
 Description=RustDesk hbbs (ID/Rendezvous Server)
 After=network.target
-
 [Service]
 Type=simple
 WorkingDirectory=${WORK_DIR}
@@ -86,7 +80,6 @@ ExecStart=${WORK_DIR}/hbbs ${RELAY_ARG}
 Restart=always
 RestartSec=5
 LimitNOFILE=1048576
-
 [Install]
 WantedBy=multi-user.target
 EOF
@@ -95,7 +88,6 @@ EOF
 [Unit]
 Description=RustDesk hbbr (Relay Server)
 After=network.target
-
 [Service]
 Type=simple
 WorkingDirectory=${WORK_DIR}
@@ -103,7 +95,6 @@ ExecStart=${WORK_DIR}/hbbr
 Restart=always
 RestartSec=5
 LimitNOFILE=1048576
-
 [Install]
 WantedBy=multi-user.target
 EOF
@@ -111,26 +102,21 @@ EOF
     systemctl daemon-reload
     systemctl enable --now rustdesk-hbbs rustdesk-hbbr
 
-    info "等待hbbs生成密钥..."
+    info "等待密钥生成..."
     KEY_WAIT=0
     while [ ! -f "${WORK_DIR}/id_ed25519.pub" ] && [ ${KEY_WAIT} -lt 10 ]; do
-        sleep 1
-        KEY_WAIT=$((KEY_WAIT + 1))
+        sleep 1; KEY_WAIT=$((KEY_WAIT + 1))
     done
 
-    info "配置防火墙端口..."
-    ufw allow 21115/tcp comment 'RustDesk NAT' > /dev/null 2>&1 || true
-    ufw allow 21116/tcp comment 'RustDesk ID' > /dev/null 2>&1 || true
-    ufw allow 21116/udp comment 'RustDesk UDP' > /dev/null 2>&1 || true
-    ufw allow 21117/tcp comment 'RustDesk Relay' > /dev/null 2>&1 || true
+    info "配置防火墙..."
+    ufw allow 21115/tcp > /dev/null 2>&1 || true
+    ufw allow 21116/tcp > /dev/null 2>&1 || true
+    ufw allow 21116/udp > /dev/null 2>&1 || true
+    ufw allow 21117/tcp > /dev/null 2>&1 || true
 
-    if [ -f "${WORK_DIR}/id_ed25519.pub" ]; then
-        PUBKEY=$(tr -d '\n' < ${WORK_DIR}/id_ed25519.pub)
-    else
-        PUBKEY="未生成"
-    fi
+    PUBKEY=$(tr -d '\n' < ${WORK_DIR}/id_ed25519.pub 2>/dev/null || echo "未生成")
 
-    if [ -n "${PUBLIC_IP}" ] && [ -n "${PUBKEY}" ] && [ "${PUBKEY}" != "未生成" ]; then
+    if [ -n "${PUBLIC_IP}" ] && [ "${PUBKEY}" != "未生成" ]; then
         JSON_STR="{\"host\":\"${PUBLIC_IP}\",\"relay\":\"${PUBLIC_IP}:21117\",\"api\":\"\",\"key\":\"${PUBKEY}\"}"
         B64_STR=$(echo -n "${JSON_STR}" | base64 -w0 | tr '+/' '-_' | tr -d '=')
         IMPORT_STR=$(echo -n "${B64_STR}" | rev)
@@ -139,18 +125,16 @@ EOF
     fi
 
     echo ""
-    ok "RustDesk Server 安装完成！"
-    echo ""
+    ok "安装完成！"
     echo "  公网IP:   ${PUBLIC_IP}"
     echo "  公钥Key:  ${PUBKEY}"
-    echo ""
     if [ -n "${IMPORT_STR}" ]; then
-        echo "  客户端一键导入串（全选复制）："
         echo ""
+        echo "  一键导入串："
         echo "  ${IMPORT_STR}"
-        echo ""
     fi
-    echo "  运行 rustdesk 命令打开管理菜单"
+    echo ""
+    echo "  运行 rustdesk 打开管理菜单"
     echo ""
 fi
 
@@ -170,10 +154,7 @@ ok()    { echo -e "\033[1;32m[OK]\033[0m $*"; }
 warn()  { echo -e "\033[1;33m[WARN]\033[0m $*"; }
 err()   { echo -e "\033[1;31m[ERROR]\033[0m $*"; }
 
-get_pubkey() {
-    tr -d '\n' < ${WORK_DIR}/id_ed25519.pub 2>/dev/null
-}
-
+get_pubkey() { tr -d '\n' < ${WORK_DIR}/id_ed25519.pub 2>/dev/null; }
 get_ip() {
     wget -qO- --timeout=5 "${IP_API}" 2>/dev/null \
         || wget -qO- --timeout=5 "api.ipify.org" 2>/dev/null \
@@ -188,7 +169,7 @@ show_menu() {
     echo "1.  查看服务状态"
     echo "2.  注册设备列表"
     echo "3.  修改设备备注"
-    echo "4.  探测在线设备（清库重读，约10秒）"
+    echo "4.  探测在线设备（清库轮询，最多5分钟）"
     echo "5.  活跃远程连接"
     echo "6.  生成客户端一键导入串"
     echo "7.  客户端下载地址"
@@ -205,10 +186,7 @@ show_menu() {
     read -p "请输入选项：" CHOICE
 }
 
-pause() {
-    echo ""
-    read -p "按回车返回菜单..."
-}
+pause() { echo ""; read -p "按回车返回菜单..."; }
 
 svc_summary() {
     local svc=$1
@@ -229,28 +207,20 @@ action_status() {
 action_devices() {
     echo ""
     echo "==== 注册设备列表 ===="
-    if [ ! -f "${DB_FILE}" ]; then
-        echo "（数据库不存在）"
-        pause; return
-    fi
+    [ ! -f "${DB_FILE}" ] && { echo "（数据库不存在）"; pause; return; }
     local count=$(sqlite3 "${DB_FILE}" "SELECT count(*) FROM peer;" 2>/dev/null)
-    if [ "${count}" = "0" ]; then
-        echo "（暂无注册设备）"
-    else
-        printf "%-15s %-20s %-15s %s\n" "设备ID" "注册时间(CST)" "备注" "公网IP"
-        echo "---------------------------------------------------------------"
-        sqlite3 -json "${DB_FILE}" "SELECT id, created_at, note, info FROM peer;" 2>/dev/null \
-        | jq -r '.[] | [
-            .id,
-            (.created_at | strptime("%Y-%m-%d %H:%M:%S") | mktime | . + (8*3600) | strftime("%Y-%m-%d %H:%M:%S")),
-            (.note // "-"),
-            (.info | fromjson).ip // "-"
-        ] | @tsv' \
-        | sed 's/::ffff://' \
-        | while IFS=$'\t' read -r devid cst_time note ip; do
-            printf "%-15s %-20s %-15s %s\n" "$devid" "$cst_time" "$note" "$ip"
-        done
-    fi
+    [ "${count}" = "0" ] && { echo "（暂无注册设备）"; pause; return; }
+    printf "%-15s %-20s %-15s %s\n" "设备ID" "注册时间(CST)" "备注" "公网IP"
+    echo "---------------------------------------------------------------"
+    sqlite3 -json "${DB_FILE}" "SELECT id, created_at, note, info FROM peer;" 2>/dev/null \
+    | jq -r '.[] | [
+        .id,
+        (.created_at | strptime("%Y-%m-%d %H:%M:%S") | mktime | . + (8*3600) | strftime("%Y-%m-%d %H:%M:%S")),
+        (.note // "-"), (.info | fromjson).ip // "-"
+    ] | @tsv' | sed 's/::ffff://' \
+    | while IFS=$'\t' read -r devid cst_time note ip; do
+        printf "%-15s %-20s %-15s %s\n" "$devid" "$cst_time" "$note" "$ip"
+    done
     echo "---------------------------------------------------------------"
     pause
 }
@@ -258,8 +228,7 @@ action_devices() {
 action_note() {
     echo ""
     echo "==== 修改设备备注 ===="
-    if [ ! -f "${DB_FILE}" ]; then err "数据库不存在"; pause; return; fi
-
+    [ ! -f "${DB_FILE}" ] && { err "数据库不存在"; pause; return; }
     echo "当前设备："
     sqlite3 -json "${DB_FILE}" "SELECT id, note, info FROM peer;" 2>/dev/null \
         | jq -r '.[] | [.id, (.note // "-"), (.info | fromjson).ip // "-"] | @tsv' \
@@ -267,21 +236,18 @@ action_note() {
         | while IFS=$'\t' read -r devid note ip; do
             echo "  ${devid}  备注:${note}  IP:${ip}"
         done
-
     echo ""
     read -p "输入设备ID：" TARGET_ID
     [ -z "${TARGET_ID}" ] && { warn "取消"; pause; return; }
-
     local exist=$(sqlite3 "${DB_FILE}" "SELECT count(*) FROM peer WHERE id='${TARGET_ID}';" 2>/dev/null)
-    if [ "${exist}" = "0" ]; then err "设备 ${TARGET_ID} 不存在"; pause; return; fi
-
+    [ "${exist}" = "0" ] && { err "设备 ${TARGET_ID} 不存在"; pause; return; }
     read -p "新备注（留空=清空）：" NEW_NOTE
     if [ -z "${NEW_NOTE}" ]; then
         sqlite3 "${DB_FILE}" "UPDATE peer SET note = NULL WHERE id='${TARGET_ID}';"
         ok "已清空备注"
     else
-        NEW_NOTE_ESC=$(echo "${NEW_NOTE}" | sed "s/'/''/g")
-        sqlite3 "${DB_FILE}" "UPDATE peer SET note = '${NEW_NOTE_ESC}' WHERE id='${TARGET_ID}';"
+        ESC=$(echo "${NEW_NOTE}" | sed "s/'/''/g")
+        sqlite3 "${DB_FILE}" "UPDATE peer SET note = '${ESC}' WHERE id='${TARGET_ID}';"
         ok "备注已更新"
     fi
     pause
@@ -290,10 +256,10 @@ action_note() {
 action_online_probe() {
     echo ""
     echo "==== 探测在线设备 ===="
-    if [ ! -f "${DB_FILE}" ]; then err "数据库不存在"; pause; return; fi
-
-    warn "原理：清空peer表 → 等10秒 → 在线设备会自动重新注册 → 读库"
-    warn "注意：查询期间所有设备会短暂断开重连，约10秒恢复"
+    [ ! -f "${DB_FILE}" ] && { err "数据库不存在"; pause; return; }
+    warn "原理：清空peer表 → 每10秒轮询 → 在线设备在下个心跳周期重新注册"
+    warn "RustDesk客户端心跳周期约5分钟，最长等待约5分钟"
+    warn "注意：查询期间设备会短暂断开重连"
     echo ""
     read -p "确认继续？输入 y：" CONFIRM
     [ "${CONFIRM}" != "y" ] && { info "已取消"; pause; return; }
@@ -302,17 +268,26 @@ action_online_probe() {
     info "清空peer表..."
     sqlite3 "${DB_FILE}" "DELETE FROM peer;"
 
-    info "等待10秒，在线设备重新注册..."
-    for i in 10 9 8 7 6 5 4 3 2 1; do
-        printf "\r  倒计时 %d 秒..." ${i}
-        sleep 1
+    # 轮询：每10秒查一次，最多等300秒（5分钟）
+    local max_wait=300
+    local elapsed=0
+    local found=0
+    info "等待在线设备重新注册（Ctrl+C可提前退出）..."
+    while [ ${elapsed} -lt ${max_wait} ]; do
+        sleep 10
+        elapsed=$((elapsed + 10))
+        local c=$(sqlite3 "${DB_FILE}" "SELECT count(*) FROM peer;" 2>/dev/null)
+        printf "\r  已等待 %d秒，当前注册设备数：%d" ${elapsed} "${c:-0}"
+        if [ "${c}" -gt 0 ] 2>/dev/null; then
+            found=1
+            break
+        fi
     done
     echo ""
-
-    local count=$(sqlite3 "${DB_FILE}" "SELECT count(*) FROM peer;" 2>/dev/null)
     echo ""
-    if [ "${count}" = "0" ]; then
-        echo "（10秒内无设备重新注册，可能全部离线）"
+
+    if [ ${found} -eq 0 ]; then
+        echo "（5分钟内无设备重新注册，可能全部离线）"
     else
         echo "==== 在线设备列表 ===="
         printf "%-15s %-20s %-15s %s\n" "设备ID" "注册时间(CST)" "备注" "公网IP"
@@ -321,15 +296,13 @@ action_online_probe() {
         | jq -r '.[] | [
             .id,
             (.created_at | strptime("%Y-%m-%d %H:%M:%S") | mktime | . + (8*3600) | strftime("%Y-%m-%d %H:%M:%S")),
-            (.note // "-"),
-            (.info | fromjson).ip // "-"
-        ] | @tsv' \
-        | sed 's/::ffff://' \
+            (.note // "-"), (.info | fromjson).ip // "-"
+        ] | @tsv' | sed 's/::ffff://' \
         | while IFS=$'\t' read -r devid cst_time note ip; do
             printf "%-15s %-20s %-15s %s\n" "$devid" "$cst_time" "$note" "$ip"
         done
         echo "---------------------------------------------------------------"
-        echo "在线设备数：${count}"
+        echo "在线设备数：${c}"
     fi
     pause
 }
@@ -338,10 +311,8 @@ action_active() {
     echo ""
     echo "==== 最近中继连接（10分钟内） ===="
     journalctl -u rustdesk-hbbr --since "10 minutes ago" --no-pager 2>/dev/null \
-        | grep -i 'relay conn' \
-        | sed 's/::ffff://g' \
-        | sed 's/^.*hbbr\[[0-9]*\]://' \
-        | tail -10 || echo "（无）"
+        | grep -i 'relay conn' | sed 's/::ffff://g' \
+        | sed 's/^.*hbbr\[[0-9]*\]://' | tail -10 || echo "（无）"
     pause
 }
 
@@ -349,7 +320,7 @@ action_import() {
     echo ""
     PUBKEY=$(get_pubkey)
     IP=$(get_ip)
-    if [ -z "${PUBKEY}" ]; then err "公钥不存在"; pause; return; fi
+    [ -z "${PUBKEY}" ] && { err "公钥不存在"; pause; return; }
     JSON="{\"host\":\"${IP}\",\"relay\":\"${IP}:21117\",\"api\":\"\",\"key\":\"${PUBKEY}\"}"
     B64=$(echo -n "${JSON}" | base64 -w0 | tr '+/' '-_' | tr -d '=')
     IMPORT_STR=$(echo -n "${B64}" | rev)
@@ -376,24 +347,19 @@ action_download() {
 
 action_start() {
     echo ""
-    systemctl start rustdesk-hbbs rustdesk-hbbr
-    sleep 1
+    systemctl start rustdesk-hbbs rustdesk-hbbr; sleep 1
     systemctl is-active rustdesk-hbbs > /dev/null && ok "hbbs 运行中" || err "hbbs 未运行"
     systemctl is-active rustdesk-hbbr > /dev/null && ok "hbbr 运行中" || err "hbbr 未运行"
     pause
 }
 
 action_stop() {
-    echo ""
-    systemctl stop rustdesk-hbbs rustdesk-hbbr
-    ok "服务已停止"
-    pause
+    echo ""; systemctl stop rustdesk-hbbs rustdesk-hbbr; ok "服务已停止"; pause
 }
 
 action_restart() {
     echo ""
-    systemctl restart rustdesk-hbbs rustdesk-hbbr
-    sleep 1
+    systemctl restart rustdesk-hbbs rustdesk-hbbr; sleep 1
     systemctl is-active rustdesk-hbbs > /dev/null && ok "hbbs 运行中" || err "hbbs 未运行"
     systemctl is-active rustdesk-hbbr > /dev/null && ok "hbbr 运行中" || err "hbbr 未运行"
     pause
@@ -409,20 +375,15 @@ action_test() {
 }
 
 action_ports() {
-    echo ""
-    ss -tulnp | grep -E "hbbs|hbbr" || warn "未找到进程"
-    pause
+    echo ""; ss -tulnp | grep -E "hbbs|hbbr" || warn "未找到进程"; pause
 }
 
 action_ip() {
-    echo ""
-    echo "公网IP：$(get_ip)"
-    pause
+    echo ""; echo "公网IP：$(get_ip)"; pause
 }
 
 action_logs() {
-    echo ""
-    echo "实时日志（Ctrl+C退出）"
+    echo ""; echo "实时日志（Ctrl+C退出）"
     journalctl -u rustdesk-hbbs -u rustdesk-hbbr -f 2>/dev/null | sed 's/::ffff://g'
     pause
 }
@@ -440,11 +401,8 @@ action_uninstall() {
         ufw delete allow 21116/tcp 2>/dev/null || true
         ufw delete allow 21116/udp 2>/dev/null || true
         ufw delete allow 21117/tcp 2>/dev/null || true
-        rm -rf ${WORK_DIR}
-        rm -f /usr/local/bin/rustdesk
-        rm -rf /tmp/rustdesk* 2>/dev/null || true
-        ok "已完全卸载"
-        exit 0
+        rm -rf ${WORK_DIR} /usr/local/bin/rustdesk /tmp/rustdesk* 2>/dev/null || true
+        ok "已完全卸载"; exit 0
     else
         info "已取消"
     fi
