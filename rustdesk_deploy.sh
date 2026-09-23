@@ -157,7 +157,7 @@ EOF
         echo ""
         echo "  使用方法：打开RustDesk客户端 → 设置 → 网络 → 点【导入服务器配置】粘贴"
     else
-        echo "  导入串生成失败，运行 rustdesk → 选项5 重新生成"
+        echo "  导入串生成失败，运行 rustdesk → 选项6 重新生成"
     fi
     echo ""
     echo "  运行 rustdesk 命令打开管理菜单"
@@ -175,6 +175,7 @@ cat > ${RD_CMD} << 'MENUEOF'
 WORK_DIR="/opt/rustdesk"
 IP_API="icanhazip.com"
 DB_FILE="${WORK_DIR}/db_v2.sqlite3"
+TMP_DB="/tmp/rustdesk_online.db"
 
 info()  { echo -e "\033[1;34m[INFO]\033[0m $*"; }
 ok()    { echo -e "\033[1;32m[OK]\033[0m $*"; }
@@ -200,17 +201,18 @@ show_menu() {
     echo "1.  查看服务状态"
     echo "2.  注册设备列表（含备注）"
     echo "3.  修改设备备注"
-    echo "4.  活跃远程连接"
-    echo "5.  生成客户端一键导入串（含公钥）"
-    echo "6.  客户端下载地址"
-    echo "7.  启动服务"
-    echo "8.  停止服务"
-    echo "9.  重启服务"
-    echo "10. 端口连通测试"
-    echo "11. 查看监听端口"
-    echo "12. 获取服务器公网IP"
-    echo "13. 实时日志"
-    echo "14. 卸载RustDesk（完全清理）"
+    echo "4.  探测在线设备（约45秒）"
+    echo "5.  活跃远程连接"
+    echo "6.  生成客户端一键导入串（含公钥）"
+    echo "7.  客户端下载地址"
+    echo "8.  启动服务"
+    echo "9.  停止服务"
+    echo "10. 重启服务"
+    echo "11. 端口连通测试"
+    echo "12. 查看监听端口"
+    echo "13. 获取服务器公网IP"
+    echo "14. 实时日志"
+    echo "15. 卸载RustDesk（完全清理）"
     echo "0.  退出"
     echo "==============================================================="
     read -p "请输入选项：" CHOICE
@@ -307,7 +309,6 @@ action_note() {
         return
     fi
 
-    # 先列出所有设备
     echo "当前设备列表："
     echo "-------------------------------------------------------------------------"
     printf "%-15s %-15s %s\n" "设备ID" "当前备注" "公网IP"
@@ -328,7 +329,6 @@ action_note() {
         return
     fi
 
-    # 确认设备存在
     local exist=$(sqlite3 "${DB_FILE}" "SELECT count(*) FROM peer WHERE id='${TARGET_ID}';" 2>/dev/null)
     if [ "${exist}" = "0" ]; then
         err "设备ID ${TARGET_ID} 不存在"
@@ -346,11 +346,90 @@ action_note() {
         sqlite3 "${DB_FILE}" "UPDATE peer SET note = NULL WHERE id='${TARGET_ID}';"
         ok "已清空设备 ${TARGET_ID} 的备注"
     else
-        # 转义单引号
         NEW_NOTE_ESC=$(echo "${NEW_NOTE}" | sed "s/'/''/g")
         sqlite3 "${DB_FILE}" "UPDATE peer SET note = '${NEW_NOTE_ESC}' WHERE id='${TARGET_ID}';"
         ok "设备 ${TARGET_ID} 备注已更新为：${NEW_NOTE}"
     fi
+    pause
+}
+
+action_online_probe() {
+    echo ""
+    echo "==== 探测在线设备 ===="
+
+    # 检查hbbs运行中
+    if ! systemctl is-active rustdesk-hbbs > /dev/null 2>&1; then
+        err "hbbs服务未运行，无法探测"
+        pause
+        return
+    fi
+
+    if [ ! -f "${DB_FILE}" ]; then
+        err "数据库文件不存在"
+        pause
+        return
+    fi
+
+    echo "原理：复制数据库到临时文件 → 清空临时库peer表 → 等待45秒"
+    echo "      在线客户端会在心跳时自动重新注册到临时库"
+    echo "      正式数据库完全不受影响"
+    echo ""
+    read -p "确认开始探测？输入 y 继续：" CONFIRM
+    if [ "${CONFIRM}" != "y" ] && [ "${CONFIRM}" != "Y" ]; then
+        info "已取消"
+        pause
+        return
+    fi
+
+    # 1. 复制数据库到临时文件
+    info "复制数据库到临时文件..."
+    cp "${DB_FILE}" "${TMP_DB}"
+    # 同时复制wal/shm（如果存在）
+    [ -f "${DB_FILE}-wal" ] && cp "${DB_FILE}-wal" "${TMP_DB}-wal"
+    [ -f "${DB_FILE}-shm" ] && cp "${DB_FILE}-shm" "${TMP_DB}-shm"
+
+    # 2. 清空临时库peer表
+    info "清空临时库peer表..."
+    sqlite3 "${TMP_DB}" "DELETE FROM peer;"
+
+    # 3. 倒计时等待45秒
+    echo ""
+    info "等待在线客户端上报心跳（45秒）..."
+    for i in $(seq 45 -1 1); do
+        printf "\r剩余等待：%02d 秒" "${i}"
+        sleep 1
+    done
+    printf "\r等待完成！           \n"
+
+    # 4. 查询临时库
+    echo ""
+    echo "==== 当前在线设备列表 ===="
+    printf "%-15s %-20s %-15s %s\n" "设备ID" "上报时间(CST)" "备注" "公网IP"
+    echo "-------------------------------------------------------------------------"
+
+    local online_count=$(sqlite3 "${TMP_DB}" "SELECT count(*) FROM peer;" 2>/dev/null)
+    if [ "${online_count}" = "0" ]; then
+        echo "（45秒内无设备上报，可能全部离线）"
+    else
+        sqlite3 -json "${TMP_DB}" "SELECT id, created_at, note, info FROM peer;" 2>/dev/null \
+        | jq -r '.[] | [
+            .id,
+            (.created_at | strptime("%Y-%m-%d %H:%M:%S") | mktime | . + (8*3600) | strftime("%Y-%m-%d %H:%M:%S")),
+            (.note // "-"),
+            (.info | fromjson).ip // "-"
+        ] | @tsv' \
+        | sed 's/::ffff://' \
+        | while IFS=$'\t' read -r devid cst_time note ip; do
+            printf "%-15s %-20s %-15s %s\n" "$devid" "$cst_time" "$note" "$ip"
+        done
+    fi
+
+    echo "-------------------------------------------------------------------------"
+    echo "在线设备数：${online_count}"
+
+    # 5. 清理临时文件
+    rm -f "${TMP_DB}" "${TMP_DB}-wal" "${TMP_DB}-shm"
+    ok "临时文件已清理，正式数据库未受影响"
     pause
 }
 
@@ -540,17 +619,18 @@ while true; do
         1) action_status ;;
         2) action_devices ;;
         3) action_note ;;
-        4) action_active ;;
-        5) action_import ;;
-        6) action_download ;;
-        7) action_start ;;
-        8) action_stop ;;
-        9) action_restart ;;
-        10) action_test ;;
-        11) action_ports ;;
-        12) action_ip ;;
-        13) action_logs ;;
-        14) action_uninstall ;;
+        4) action_online_probe ;;
+        5) action_active ;;
+        6) action_import ;;
+        7) action_download ;;
+        8) action_start ;;
+        9) action_stop ;;
+        10) action_restart ;;
+        11) action_test ;;
+        12) action_ports ;;
+        13) action_ip ;;
+        14) action_logs ;;
+        15) action_uninstall ;;
         0) echo "退出"; exit 0 ;;
         *) warn "无效选项" ;;
     esac
