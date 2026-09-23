@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================ #
-#  VPS 初始化脚本（系统优化 + SSH加固 + UFW防火墙 + 状态检测）
+#  VPS 初始化脚本（系统优化 + SSH加固 + UFW + fail2ban）
 #  适用：Debian Bookworm 1核1G VPS
 #  用法：bash vps_init.sh
 # ============================================================ #
@@ -40,7 +40,35 @@ systemctl restart systemd-journald 2>/dev/null
 echo_ok "journald 已配置内存模式（最大16M）"
 
 # ============================================================
-#  第二部分：UFW 防火墙
+#  第二部分：内核网络参数加固
+# ============================================================
+echo ""
+echo_info "配置内核网络参数（防扫描/防SYN flood）..."
+cat > /etc/sysctl.d/99-vps-hardening.conf <<'EOF'
+# 禁用ICMP重定向
+net.ipv4.conf.all.accept_redirects = 0
+net.ipv4.conf.default.accept_redirects = 0
+# 禁用源路由
+net.ipv4.conf.all.accept_source_route = 0
+net.ipv4.conf.default.accept_source_route = 0
+# 忽略ICMP广播请求
+net.ipv4.icmp_echo_ignore_broadcasts = 1
+# 忽略 bogus 错误响应
+net.ipv4.icmp_ignore_bogus_error_responses = 1
+# 开启SYN cookies防SYN flood
+net.ipv4.tcp_syncookies = 1
+# 忽略来自外部的SSM重定向
+net.ipv4.conf.all.secure_redirects = 0
+net.ipv4.conf.default.secure_redirects = 0
+# 反向路径过滤（防IP欺骗）
+net.ipv4.conf.all.rp_filter = 1
+net.ipv4.conf.default.rp_filter = 1
+EOF
+sysctl -p /etc/sysctl.d/99-vps-hardening.conf >/dev/null 2>&1
+echo_ok "内核参数已加固"
+
+# ============================================================
+#  第三部分：UFW 防火墙
 # ============================================================
 echo ""
 echo "============ 【UFW防火墙】 ============"
@@ -67,13 +95,12 @@ else
 fi
 
 # ============================================================
-#  第三部分：安装 vfw 端口管理命令
+#  第四部分：安装 vfw 端口管理命令
 # ============================================================
 echo ""
 echo_info "安装 vfw 端口管理命令 ..."
 cat > /usr/local/bin/vfw <<'VFW_EOF'
 #!/bin/bash
-# vfw - VPS 防火墙端口管理（交互式菜单）
 if [ "$(id -u)" -ne 0 ]; then
     echo "必须root运行"
     exit 1
@@ -142,13 +169,12 @@ chmod +x /usr/local/bin/vfw
 echo_ok "vfw 命令已安装"
 
 # ============================================================
-#  第四部分：安装 vupdate 安全补丁命令
+#  第五部分：安装 vupdate 安全补丁命令
 # ============================================================
 echo ""
 echo_info "安装 vupdate 安全补丁命令 ..."
 cat > /usr/local/bin/vupdate <<'VUPDATE_EOF'
 #!/bin/bash
-# vupdate - VPS 安全补丁更新（1核1G优化版）
 set -u
 
 echo_ok()    { echo -e "\033[32m[OK]\033[0m  $1"; }
@@ -202,9 +228,13 @@ echo_ok "Swap: ${SWAP_AFTER}MB"
 echo 'APT::Acquire::Queue-Mode "access";' > /etc/apt/apt.conf.d/99lowmem
 echo 'APT::Acquire::Retries "3";' >> /etc/apt/apt.conf.d/99lowmem
 
-if fuser /var/lib/dpkg/lock-frontend &>/dev/null; then
-    echo_error "apt进程正在运行，请稍后再试"
-    exit 2
+# 检查dpkg锁（用文件检测，不依赖fuser）
+if [ -f /var/lib/dpkg/lock-frontend ]; then
+    LOCK_PID=$(lsof -t /var/lib/dpkg/lock-frontend 2>/dev/null || echo "")
+    if [ -n "$LOCK_PID" ]; then
+        echo_error "apt进程(PID:${LOCK_PID})正在运行，请稍后再试"
+        exit 2
+    fi
 fi
 
 # --- 刷新软件源 ---
@@ -267,7 +297,28 @@ chmod +x /usr/local/bin/vupdate
 echo_ok "vupdate 命令已安装"
 
 # ============================================================
-#  第五部分：备份 sshd 配置
+#  第六部分：安装 fail2ban（自动封SSH爆破IP）
+# ============================================================
+echo ""
+echo "============ 【fail2ban 防爆破】 ============"
+echo_info "安装 fail2ban ..."
+apt install -y fail2ban >/dev/null 2>&1
+
+cat > /etc/fail2ban/jail.d/sshd.local <<'EOF'
+[sshd]
+enabled = true
+port = ssh
+maxretry = 3
+bantime = 3600
+findtime = 600
+EOF
+
+systemctl enable fail2ban >/dev/null 2>&1
+systemctl restart fail2ban
+echo_ok "fail2ban 已启用（SSH失败3次封IP 1小时）"
+
+# ============================================================
+#  第七部分：备份 sshd 配置
 # ============================================================
 echo ""
 echo_info "备份 sshd_config ..."
@@ -275,7 +326,7 @@ cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak.$(date +%Y%m%d%H%M%S)
 echo_ok "已备份"
 
 # ============================================================
-#  第六部分：SSH安全加固
+#  第八部分：SSH安全加固
 # ============================================================
 echo ""
 echo_info "开始SSH安全加固..."
@@ -284,7 +335,14 @@ sed -i 's/^#MaxAuthTries 6/MaxAuthTries 3/' /etc/ssh/sshd_config
 sed -i 's/^MaxAuthTries 6/MaxAuthTries 3/' /etc/ssh/sshd_config
 sed -i 's/^#PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config
 sed -i 's/^PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config
-echo_ok "SSH配置已修改"
+
+# SSH空闲超时：5分钟无操作断开
+sed -i 's/^#ClientAliveInterval.*/ClientAliveInterval 300/' /etc/ssh/sshd_config
+sed -i 's/^ClientAliveInterval.*/ClientAliveInterval 300/' /etc/ssh/sshd_config
+sed -i 's/^#ClientAliveCountMax.*/ClientAliveCountMax 2/' /etc/ssh/sshd_config
+sed -i 's/^ClientAliveCountMax.*/ClientAliveCountMax 2/' /etc/ssh/sshd_config
+
+echo_ok "SSH配置已修改（密钥登录+密码关闭+超时断开）"
 
 echo ""
 echo_warn "即将重启 sshd"
@@ -297,7 +355,7 @@ systemctl restart sshd
 echo_ok "sshd 已重启"
 
 # ============================================================
-#  第七部分：状态检测
+#  第九部分：状态检测
 # ============================================================
 echo ""
 echo "=========================================================="
@@ -323,6 +381,15 @@ echo_info "--- 防火墙状态 ---"
 ufw status
 
 echo ""
+echo_info "--- fail2ban 状态 ---"
+if systemctl is-active --quiet fail2ban; then
+    echo_ok "fail2ban 运行中"
+    fail2ban-client status sshd 2>/dev/null | head -5
+else
+    echo_warn "fail2ban 未运行"
+fi
+
+echo ""
 echo_info "--- SSH安全状态 ---"
 PWD_AUTH=$(grep -E '^PasswordAuthentication' /etc/ssh/sshd_config | awk '{print $2}')
 if [ "$PWD_AUTH" = "no" ]; then
@@ -338,6 +405,8 @@ else
 fi
 MAX_TRIES=$(grep -E '^MaxAuthTries' /etc/ssh/sshd_config | awk '{print $2}')
 echo_info "最大认证次数：${MAX_TRIES:-6}"
+ALIVE_INT=$(grep -E '^ClientAliveInterval' /etc/ssh/sshd_config | awk '{print $2}')
+echo_info "空闲超时：${ALIVE_INT:-300}秒"
 
 echo ""
 echo_info "--- 已安装命令 ---"
