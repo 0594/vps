@@ -66,70 +66,78 @@ else
     echo_warn "跳过启用，手动执行 ufw enable"
 fi
 
-# 安装 vfw 端口管理命令
+# 安装 vfw 端口管理命令（交互式菜单版）
 echo_info "安装 vfw 端口管理命令 ..."
 cat > /usr/local/bin/vfw <<'VFW_EOF'
 #!/bin/bash
-# vfw - VPS 防火墙端口管理命令
-# 用法：
-#   vfw allow 8080      放行TCP端口
-#   vfw allow 8080 udp  放行UDP端口
-#   vfw deny 8080       拒绝端口
-#   vfw status          查看防火墙状态
-#   vfw list           列出所有规则
-
+# vfw - VPS 防火墙端口管理（交互式菜单）
 if [ "$(id -u)" -ne 0 ]; then
     echo "必须root运行"
     exit 1
 fi
 
-case "${1:-}" in
-    allow)
-        PORT="${2:-}"
-        PROTO="${3:-tcp}"
-        if [ -z "$PORT" ]; then
-            echo "用法: vfw allow <端口> [tcp|udp]"
-            exit 1
-        fi
-        ufw allow ${PORT}/${PROTO}
-        echo "✅ 已放行 ${PORT}/${PROTO}"
-        ;;
-    deny)
-        PORT="${2:-}"
-        PROTO="${3:-tcp}"
-        if [ -z "$PORT" ]; then
-            echo "用法: vfw deny <端口> [tcp|udp]"
-            exit 1
-        fi
-        ufw delete allow ${PORT}/${PROTO} 2>/dev/null
-        ufw deny ${PORT}/${PROTO}
-        echo "🚫 已拒绝 ${PORT}/${PROTO}"
-        ;;
-    status)
-        ufw status verbose
-        ;;
-    list)
-        ufw status numbered
-        ;;
-    *)
-        echo "vfw - VPS防火墙端口管理"
-        echo ""
-        echo "用法:"
-        echo "  vfw allow <端口> [tcp|udp]   放行端口"
-        echo "  vfw deny <端口> [tcp|udp]    拒绝端口"
-        echo "  vfw status                  查看状态"
-        echo "  vfw list                    列出规则"
-        echo ""
-        echo "示例:"
-        echo "  vfw allow 8080"
-        echo "  vfw allow 53 udp"
-        echo "  vfw deny 8080"
-        ;;
-esac
+while true; do
+    clear
+    echo "============================================"
+    echo "  VPS 防火墙端口管理"
+    echo "============================================"
+    echo ""
+    echo "  1) 开放端口"
+    echo "  2) 删除端口"
+    echo "  3) 查看端口列表"
+    echo "  0) 退出"
+    echo ""
+    read -p "请选择 [0-3]: " CHOICE
+
+    case "$CHOICE" in
+        1)
+            echo ""
+            read -p "输入要开放的端口号: " PORT
+            if [ -z "$PORT" ]; then
+                read -p "端口不能为空，按回车继续..." DUMMY
+                continue
+            fi
+            read -p "协议 (tcp/udp，默认tcp): " PROTO
+            PROTO="${PROTO:-tcp}"
+            ufw allow ${PORT}/${PROTO}
+            echo ""
+            echo "✅ 已开放 ${PORT}/${PROTO}"
+            read -p "按回车继续..." DUMMY
+            ;;
+        2)
+            echo ""
+            ufw status numbered
+            echo ""
+            read -p "输入要删除的规则序号(数字): " NUM
+            if [ -z "$NUM" ]; then
+                read -p "序号不能为空，按回车继续..." DUMMY
+                continue
+            fi
+            ufw --force delete ${NUM}
+            echo ""
+            echo "✅ 已删除规则 #${NUM}"
+            read -p "按回车继续..." DUMMY
+            ;;
+        3)
+            echo ""
+            echo "--- 防火墙状态 ---"
+            ufw status verbose
+            echo ""
+            read -p "按回车继续..." DUMMY
+            ;;
+        0)
+            echo "再见"
+            break
+            ;;
+        *)
+            read -p "无效选择，按回车继续..." DUMMY
+            ;;
+    esac
+done
 VFW_EOF
 chmod +x /usr/local/bin/vfw
 echo_ok "vfw 命令已安装到 /usr/local/bin/vfw"
-echo_info "使用方法: vfw allow 8080 / vfw deny 8080 / vfw status / vfw list"
+echo_info "使用方法: 直接输入 vfw 即可进入菜单"
 
 # ============================================================
 #  第三部分：备份 sshd 配置
@@ -214,7 +222,5 @@ echo "  ✅ 初始化完成"
 echo "=========================================================="
 echo_info ""
 echo_info "常用命令："
-echo_info "  vfw allow 8080   放行端口"
-echo_info "  vfw deny 8080    拒绝端口"
-echo_info "  vfw status      查看防火墙"
-echo_info "  vps_safe_update.sh  安全补丁更新"
+echo_info "  vfw               端口管理菜单（开放/删除/查看）"
+echo_info "  vps_safe_update.sh 安全补丁更新"
