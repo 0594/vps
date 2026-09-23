@@ -8,6 +8,7 @@
 
 RD_VERSION="1.1.16"
 WORK_DIR="/opt/rustdesk"
+IP_API="icanhazip.com"
 
 info()  { echo -e "\033[1;34m[INFO]\033[0m $*"; }
 ok()    { echo -e "\033[1;32m[OK]\033[0m $*"; }
@@ -16,6 +17,13 @@ err()   { echo -e "\033[1;31m[ERROR]\033[0m $*"; }
 
 # 检查root
 [ "$(id -u)" -ne 0 ] && { err "必须用root运行"; exit 1; }
+
+# 获取公网IP（纯文本接口，不返回HTML）
+get_public_ip() {
+    wget -qO- --timeout=5 "${IP_API}" 2>/dev/null \
+        || wget -qO- --timeout=5 "api.ipify.org" 2>/dev/null \
+        || echo ""
+}
 
 # ============================================================
 # 第一部分：安装（首次运行自动执行）
@@ -58,7 +66,7 @@ if [ ! -f "${WORK_DIR}/hbbs" ]; then
 
     # 获取公网IP
     info "获取公网IP..."
-    PUBLIC_IP=$(wget -qO- --timeout=5 ifconfig.me 2>/dev/null || wget -qO- --timeout=5 ip.sb 2>/dev/null || echo "")
+    PUBLIC_IP=$(get_public_ip)
     if [ -n "${PUBLIC_IP}" ]; then
         RELAY_ARG="-r ${PUBLIC_IP}:21117"
         ok "公网IP: ${PUBLIC_IP}"
@@ -66,14 +74,6 @@ if [ ! -f "${WORK_DIR}/hbbs" ]; then
         RELAY_ARG=""
         warn "无法自动获取公网IP，中继地址留空"
     fi
-
-    # 首次启动hbbs生成密钥
-    info "首次启动生成密钥..."
-    cd ${WORK_DIR}
-    timeout 5 ${WORK_DIR}/hbbs ${RELAY_ARG} > /dev/null 2>&1 &
-    sleep 3
-    pkill -f "${WORK_DIR}/hbbs" 2>/dev/null || true
-    sleep 1
 
     # 创建systemd服务
     info "创建systemd服务..."
@@ -113,7 +113,14 @@ EOF
 
     systemctl daemon-reload
     systemctl enable --now rustdesk-hbbs rustdesk-hbbr
-    sleep 2
+
+    # 轮询等待密钥生成（最多10秒）
+    info "等待hbbs生成密钥..."
+    KEY_WAIT=0
+    while [ ! -f "${WORK_DIR}/id_ed25519.pub" ] && [ ${KEY_WAIT} -lt 10 ]; do
+        sleep 1
+        KEY_WAIT=$((KEY_WAIT + 1))
+    done
 
     # 防火墙放行
     info "配置防火墙端口..."
@@ -122,7 +129,11 @@ EOF
     ufw allow 21116/udp comment 'RustDesk UDP' > /dev/null 2>&1 || true
     ufw allow 21117/tcp comment 'RustDesk Relay' > /dev/null 2>&1 || true
 
-    PUBKEY=$(cat ${WORK_DIR}/id_ed25519.pub 2>/dev/null || echo "未生成")
+    if [ -f "${WORK_DIR}/id_ed25519.pub" ]; then
+        PUBKEY=$(cat ${WORK_DIR}/id_ed25519.pub)
+    else
+        PUBKEY="未生成（请检查hbbs服务状态）"
+    fi
 
     echo ""
     ok "RustDesk Server 安装完成！"
@@ -143,6 +154,7 @@ cat > ${RD_CMD} << 'MENUEOF'
 #!/bin/bash
 # RustDesk 管理菜单
 WORK_DIR="/opt/rustdesk"
+IP_API="icanhazip.com"
 
 info()  { echo -e "\033[1;34m[INFO]\033[0m $*"; }
 ok()    { echo -e "\033[1;32m[OK]\033[0m $*"; }
@@ -154,7 +166,9 @@ get_pubkey() {
 }
 
 get_ip() {
-    wget -qO- --timeout=5 ifconfig.me 2>/dev/null || echo "获取失败"
+    wget -qO- --timeout=5 "${IP_API}" 2>/dev/null \
+        || wget -qO- --timeout=5 "api.ipify.org" 2>/dev/null \
+        || echo "获取失败"
 }
 
 show_menu() {
@@ -229,7 +243,7 @@ action_import() {
     PUBKEY=$(get_pubkey)
     IP=$(get_ip)
     if [ -z "${PUBKEY}" ]; then
-        err "公钥文件不存在"
+        err "公钥文件不存在，请先启动hbbs服务"
         pause
         return
     fi
