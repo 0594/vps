@@ -3,7 +3,6 @@
 # RustDesk Server 一键部署脚本
 # 适用: Debian 12 Bookworm / 1核1G VPS
 # 版本: RustDesk Server 1.1.16 (hbbs + hbbr)
-# 用法: wget -O rustdesk_deploy.sh <url> && bash rustdesk_deploy.sh
 # ============================================================
 
 RD_VERSION="1.1.16"
@@ -23,9 +22,6 @@ get_public_ip() {
         || echo ""
 }
 
-# ============================================================
-# 第一部分：安装（首次运行自动执行）
-# ============================================================
 if [ ! -f "${WORK_DIR}/hbbs" ]; then
     echo ""
     echo "============================================"
@@ -36,23 +32,20 @@ if [ ! -f "${WORK_DIR}/hbbs" ]; then
     info "安装依赖..."
     apt-get update -qq
     apt-get install -y -qq wget unzip ufw sqlite3 jq > /dev/null 2>&1
-
     mkdir -p ${WORK_DIR}
 
     ARCH=$(uname -m)
     case ${ARCH} in
         x86_64)  BIN_ARCH="amd64" ;;
         aarch64) BIN_ARCH="arm64v8" ;;
-        *)       err "不支持的架构: ${ARCH}"; exit 1 ;;
+        *)       err "不支持的架构"; exit 1 ;;
     esac
 
     BIN_URL="https://github.com/rustdesk/rustdesk-server/releases/download/${RD_VERSION}/rustdesk-server-linux-${BIN_ARCH}.zip"
-
-    info "下载 RustDesk Server..."
+    info "下载..."
     cd /tmp
     wget -q --show-progress -O rustdesk-server.zip "${BIN_URL}"
     unzip -o rustdesk-server.zip -d /tmp/rustdesk-src > /dev/null
-
     cp $(find /tmp/rustdesk-src -name hbbs -type f | head -1) ${WORK_DIR}/hbbs
     cp $(find /tmp/rustdesk-src -name hbbr -type f | head -1) ${WORK_DIR}/hbbr
     chmod +x ${WORK_DIR}/hbbs ${WORK_DIR}/hbbr
@@ -61,17 +54,15 @@ if [ ! -f "${WORK_DIR}/hbbs" ]; then
     info "获取公网IP..."
     PUBLIC_IP=$(get_public_ip)
     if [ -n "${PUBLIC_IP}" ]; then
-        RELAY_ARG="-r ${PUBLIC_IP}:21117"
-        ok "公网IP: ${PUBLIC_IP}"
+        RELAY_ARG="-r ${PUBLIC_IP}:21117"; ok "公网IP: ${PUBLIC_IP}"
     else
-        RELAY_ARG=""
-        warn "无法自动获取公网IP"
+        RELAY_ARG=""; warn "无法获取公网IP"
     fi
 
     info "创建systemd服务..."
     cat > /etc/systemd/system/rustdesk-hbbs.service << EOF
 [Unit]
-Description=RustDesk hbbs (ID/Rendezvous Server)
+Description=RustDesk hbbs
 After=network.target
 [Service]
 Type=simple
@@ -83,10 +74,9 @@ LimitNOFILE=1048576
 [Install]
 WantedBy=multi-user.target
 EOF
-
     cat > /etc/systemd/system/rustdesk-hbbr.service << EOF
 [Unit]
-Description=RustDesk hbbr (Relay Server)
+Description=RustDesk hbbr
 After=network.target
 [Service]
 Type=simple
@@ -102,7 +92,7 @@ EOF
     systemctl daemon-reload
     systemctl enable --now rustdesk-hbbs rustdesk-hbbr
 
-    info "等待密钥生成..."
+    info "等待密钥..."
     KEY_WAIT=0
     while [ ! -f "${WORK_DIR}/id_ed25519.pub" ] && [ ${KEY_WAIT} -lt 10 ]; do
         sleep 1; KEY_WAIT=$((KEY_WAIT + 1))
@@ -129,18 +119,11 @@ EOF
     echo "  公网IP:   ${PUBLIC_IP}"
     echo "  公钥Key:  ${PUBKEY}"
     if [ -n "${IMPORT_STR}" ]; then
-        echo ""
-        echo "  一键导入串："
-        echo "  ${IMPORT_STR}"
+        echo ""; echo "  一键导入串："; echo "  ${IMPORT_STR}"
     fi
-    echo ""
-    echo "  运行 rustdesk 打开管理菜单"
-    echo ""
+    echo ""; echo "  运行 rustdesk 打开菜单"; echo ""
 fi
 
-# ============================================================
-# 第二部分：安装/更新管理命令 rustdesk
-# ============================================================
 RD_CMD="/usr/local/bin/rustdesk"
 
 cat > ${RD_CMD} << 'MENUEOF'
@@ -170,7 +153,7 @@ show_menu() {
     echo "2.  注册设备列表"
     echo "3.  修改设备备注"
     echo "4.  探测在线设备（清库轮询，最多5分钟）"
-    echo "5.  活跃远程连接"
+    echo "5.  活跃中继连接"
     echo "6.  生成客户端一键导入串"
     echo "7.  客户端下载地址"
     echo "8.  启动服务"
@@ -257,35 +240,23 @@ action_online_probe() {
     echo ""
     echo "==== 探测在线设备 ===="
     [ ! -f "${DB_FILE}" ] && { err "数据库不存在"; pause; return; }
-    warn "原理：清空peer表 → 每10秒轮询 → 在线设备在下个心跳周期重新注册"
-    warn "RustDesk客户端心跳周期约5分钟，最长等待约5分钟"
-    warn "注意：查询期间设备会短暂断开重连"
+    warn "清空peer表 → 每10秒轮询 → 在线设备下个心跳周期重新注册"
+    warn "心跳周期约5分钟，最长等待5分钟，期间设备会短暂断开"
     echo ""
     read -p "确认继续？输入 y：" CONFIRM
     [ "${CONFIRM}" != "y" ] && { info "已取消"; pause; return; }
-
     echo ""
     info "清空peer表..."
     sqlite3 "${DB_FILE}" "DELETE FROM peer;"
-
-    # 轮询：每10秒查一次，最多等300秒（5分钟）
-    local max_wait=300
-    local elapsed=0
-    local found=0
-    info "等待在线设备重新注册（Ctrl+C可提前退出）..."
+    local max_wait=300 elapsed=0 found=0
+    info "等待在线设备重新注册..."
     while [ ${elapsed} -lt ${max_wait} ]; do
-        sleep 10
-        elapsed=$((elapsed + 10))
+        sleep 10; elapsed=$((elapsed + 10))
         local c=$(sqlite3 "${DB_FILE}" "SELECT count(*) FROM peer;" 2>/dev/null)
-        printf "\r  已等待 %d秒，当前注册设备数：%d" ${elapsed} "${c:-0}"
-        if [ "${c}" -gt 0 ] 2>/dev/null; then
-            found=1
-            break
-        fi
+        printf "\r  已等待 %d秒，注册设备数：%d" ${elapsed} "${c:-0}"
+        [ "${c}" -gt 0 ] 2>/dev/null && { found=1; break; }
     done
-    echo ""
-    echo ""
-
+    echo ""; echo ""
     if [ ${found} -eq 0 ]; then
         echo "（5分钟内无设备重新注册，可能全部离线）"
     else
@@ -310,9 +281,13 @@ action_online_probe() {
 action_active() {
     echo ""
     echo "==== 最近中继连接（10分钟内） ===="
+    echo "（New relay request=发起请求，got paired=配对成功）"
+    echo ""
     journalctl -u rustdesk-hbbr --since "10 minutes ago" --no-pager 2>/dev/null \
-        | grep -i 'relay conn' | sed 's/::ffff://g' \
-        | sed 's/^.*hbbr\[[0-9]*\]://' | tail -10 || echo "（无）"
+        | grep -E "New relay request|got paired|Both are raw" \
+        | sed 's/::ffff://g' \
+        | sed 's/^.*hbbr\[[0-9]*\]://' \
+        | tail -20 || echo "（无中继记录）"
     pause
 }
 
