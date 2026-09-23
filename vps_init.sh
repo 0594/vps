@@ -170,7 +170,6 @@ cat > /usr/local/bin/vupdate <<'VUPDATE_EOF'
 #!/bin/bash
 set -u
 
-# 支持参数：vupdate --auto  全自动模式（不交互，装完自动重启）
 AUTO_MODE=0
 if [ "${1:-}" = "--auto" ]; then
     AUTO_MODE=1
@@ -186,7 +185,6 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
-# 自动模式写日志
 LOGFILE="/var/log/vupdate.log"
 if [ "$AUTO_MODE" = "1" ]; then
     exec >> >(tee -a "$LOGFILE") 2>&1
@@ -197,7 +195,6 @@ echo "  安全补丁更新 $( [ "$AUTO_MODE" = "1" ] && echo "[自动模式]" )"
 echo "  时间：$(date)"
 echo "=========================================================="
 
-# --- 检查并配置swap ---
 echo ""
 echo_info "检查Swap状态..."
 SWAP_NOW=$(free -m | awk '/Swap:/{print $2}')
@@ -229,11 +226,9 @@ if [ "$SWAP_AFTER" -lt 1000 ]; then
 fi
 echo_ok "Swap: ${SWAP_AFTER}MB"
 
-# --- apt低优先级配置 ---
 echo 'APT::Acquire::Queue-Mode "access";' > /etc/apt/apt.conf.d/99lowmem
 echo 'APT::Acquire::Retries "3";' >> /etc/apt/apt.conf.d/99lowmem
 
-# 检查dpkg锁
 if [ -f /var/lib/dpkg/lock-frontend ]; then
     LOCK_PID=$(lsof -t /var/lib/dpkg/lock-frontend 2>/dev/null || echo "")
     if [ -n "$LOCK_PID" ]; then
@@ -242,7 +237,6 @@ if [ -f /var/lib/dpkg/lock-frontend ]; then
     fi
 fi
 
-# --- 刷新软件源 ---
 echo ""
 echo_info "刷新软件源（低优先级运行）..."
 nice -n 10 ionice -c 3 apt update -o Acquire::Languages=none -o Acquire::Translation=none
@@ -252,7 +246,6 @@ if [ $? -ne 0 ]; then
     exit 3
 fi
 
-# --- 列出安全补丁 ---
 echo ""
 echo_info "检查安全补丁..."
 SEC_PKGS=$(apt list --upgradable 2>/dev/null | grep "bookworm-security" | cut -d/ -f1 | sort -u)
@@ -289,7 +282,6 @@ else
     apt autoremove -y
 fi
 
-# --- 结果 ---
 echo ""
 echo_info "最终状态："
 free -h
@@ -317,7 +309,6 @@ echo_ok "vupdate 命令已安装（支持 vupdate --auto 全自动模式）"
 echo ""
 echo_info "配置每月自动安全更新（每月1号凌晨3点）..."
 cat > /etc/cron.d/vps-auto-update <<'EOF'
-# 每月1号凌晨3点自动安全补丁更新，需要重启则自动重启
 0 3 1 * * root /usr/local/bin/vupdate --auto
 EOF
 chmod 644 /etc/cron.d/vps-auto-update
@@ -447,5 +438,7 @@ free -h
 
 echo ""
 echo "=========================================================="
-echo "  ✅ 初始化完成"
+echo "  ✅ 初始化完成，10秒后自动重启..."
 echo "=========================================================="
+sleep 10
+reboot
